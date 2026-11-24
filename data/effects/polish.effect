@@ -4,6 +4,7 @@ uniform texture2d image;
 uniform texture2d mask_tex;
 uniform texture2d bg_tex;
 uniform texture2d lut_tex;
+uniform texture2d mouth_tex;  // R: lips, G: mouth interior
 
 uniform float2 size;          // frame size in pixels
 uniform float2 texel;         // 1 / size
@@ -40,7 +41,19 @@ uniform float edge_hi;
 // blur
 uniform float2 blur_step;
 
+// makeup
+uniform float4 lip_color;     // rgb, strength in a
+uniform float teeth_amt;
+uniform float4 blush_color;   // rgb, strength in a
+uniform float4 cheek0;        // centre x, y (pixels), radius x, y (pixels)
+uniform float4 cheek1;
+uniform float4 eyeb0;         // centre x, y (pixels), radius (pixels), strength
+uniform float4 eyeb1;
+
 // grade
+uniform float vignette;       // 0..1
+uniform float grain;          // 0..1
+uniform float grain_seed;
 uniform float lut_amt;
 uniform float exposure;       // -0.5..0.5
 uniform float warmth;         // -1..1
@@ -143,6 +156,55 @@ float ctl_weight(float2 pos, float4 ctl)
 	return t * t;
 }
 
+// Soft light blend: keeps the light and shade of the lips, takes the hue of the colour.
+float3 soft_light(float3 b, float3 c)
+{
+	return lerp(2.0 * b * c + b * b * (1.0 - 2.0 * c), sqrt(b) * (2.0 * c - 1.0) + 2.0 * b * (1.0 - c), step(0.5, c));
+}
+
+float soft_ellipse(float2 pos, float4 e)
+{
+	float2 d = (pos - e.xy) / max(e.zw, float2(1.0, 1.0));
+	float t = saturate(1.0 - dot(d, d));
+	return t * t;
+}
+
+float4 PSMakeup(VertData v_in) : TARGET
+{
+	float4 c = image.Sample(linear_clamp, v_in.uv);
+	float3 rgb = c.rgb;
+	float2 pos = v_in.uv * size;
+	float2 m = mouth_tex.Sample(linear_clamp, v_in.uv).rg;
+
+	// lipstick: tint toward the colour in luminance-preserving soft light, then a touch of the colour itself
+	if (lip_color.a > 0.0) {
+		float3 tinted = soft_light(rgb, lip_color.rgb);
+		tinted = lerp(tinted, lip_color.rgb * (0.55 + 0.9 * luma(rgb)), 0.25);
+		rgb = lerp(rgb, tinted, m.r * lip_color.a);
+	}
+	// teeth: only bright, low-saturation pixels inside the mouth; remove yellow and lift slightly
+	if (teeth_amt > 0.0) {
+		float y = luma(rgb);
+		float sat_ = max(rgb.r, max(rgb.g, rgb.b)) - min(rgb.r, min(rgb.g, rgb.b));
+		float tooth = m.g * smoothstep(0.35, 0.55, y) * (1.0 - smoothstep(0.25, 0.45, sat_));
+		float3 white = lerp(rgb, float3(y, y, y), 0.7) * 1.12;
+		rgb = lerp(rgb, saturate(white), tooth * teeth_amt);
+	}
+	// blush: soft ellipses on the cheeks, in multiply so skin texture shows through
+	if (blush_color.a > 0.0) {
+		float b = max(soft_ellipse(pos, cheek0), soft_ellipse(pos, cheek1)) * skin_prob(c.rgb);
+		rgb = lerp(rgb, rgb * lerp(float3(1.0, 1.0, 1.0), blush_color.rgb, 0.6) * 1.06, b * blush_color.a);
+	}
+	// eye brightening: lift the whites and iris contrast inside each eye
+	if (eyeb0.w > 0.0) {
+		float e = max(soft_ellipse(pos, float4(eyeb0.xy, eyeb0.z, eyeb0.z * 0.6)),
+			      soft_ellipse(pos, float4(eyeb1.xy, eyeb1.z, eyeb1.z * 0.6)));
+		float3 lifted = saturate((rgb - 0.5) * 1.15 + 0.5 + 0.05);
+		rgb = lerp(rgb, lifted, e * eyeb0.w);
+	}
+	return float4(rgb, c.a);
+}
+
 float2 jaw_shift(float2 pos)
 {
 	float w0 = ctl_weight(pos, ctl0), w1 = ctl_weight(pos, ctl1), w2 = ctl_weight(pos, ctl2);
@@ -224,10 +286,19 @@ float4 PSGrade(VertData v_in) : TARGET
 	rgb = saturate(rgb);
 	if (lut_amt > 0.0)
 		rgb = lerp(rgb, lut_sample(rgb), lut_amt);
+	if (vignette > 0.0) {
+		float2 d = (v_in.uv - 0.5) * float2(size.x / size.y, 1.0);
+		rgb *= 1.0 - vignette * 0.75 * smoothstep(0.35, 0.95, length(d) * 1.25);
+	}
+	if (grain > 0.0) {
+		float n = frac(sin(dot(v_in.uv * size + grain_seed, float2(12.9898, 78.233))) * 43758.5453) - 0.5;
+		rgb = saturate(rgb + n * grain * 0.12 * (1.0 - abs(luma(rgb) - 0.5)));
+	}
 	return float4(rgb, c.a);
 }
 
 technique Smooth    { pass { vertex_shader = VSDefault(v_in); pixel_shader = PSSmooth(v_in); } }
+technique Makeup    { pass { vertex_shader = VSDefault(v_in); pixel_shader = PSMakeup(v_in); } }
 technique Warp      { pass { vertex_shader = VSDefault(v_in); pixel_shader = PSWarp(v_in); } }
 technique Blur      { pass { vertex_shader = VSDefault(v_in); pixel_shader = PSBlur(v_in); } }
 technique Composite { pass { vertex_shader = VSDefault(v_in); pixel_shader = PSComposite(v_in); } }

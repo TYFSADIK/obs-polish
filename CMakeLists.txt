@@ -2,7 +2,7 @@ cmake_minimum_required(VERSION 3.22)
 # universal binary (Apple silicon + Intel); must be set before project()
 set(CMAKE_OSX_DEPLOYMENT_TARGET "12.0" CACHE STRING "")
 set(CMAKE_OSX_ARCHITECTURES "arm64;x86_64" CACHE STRING "")
-project(obs-polish VERSION 0.1.0 LANGUAGES C OBJC)
+project(obs-polish VERSION 0.2.0 LANGUAGES C OBJC)
 
 # Builds against the OBS that is installed in /Applications (headers from the matching
 # obs-studio tag, fetched by scripts/fetch-obs-headers.sh into deps/obs-studio).
@@ -29,16 +29,22 @@ set_target_properties(obs-polish PROPERTIES
   MACOSX_BUNDLE_BUNDLE_VERSION ${PROJECT_VERSION}
   MACOSX_BUNDLE_SHORT_VERSION_STRING ${PROJECT_VERSION})
 
-# data/ goes into Contents/Resources, where OBS looks for a plugin's data on macOS
-add_custom_command(TARGET obs-polish POST_BUILD
+# data/ goes into Contents/Resources, where OBS looks for a plugin's data on macOS. A separate
+# target that always runs, so changing only an asset or a shader still updates the bundle.
+add_custom_target(obs-polish-data ALL
   COMMAND ${CMAKE_COMMAND} -E copy_directory "${CMAKE_SOURCE_DIR}/data"
-          "$<TARGET_BUNDLE_CONTENT_DIR:obs-polish>/Resources")
+          "$<TARGET_BUNDLE_CONTENT_DIR:obs-polish>/Resources"
+  COMMENT "Copying data into the plugin bundle")
+add_dependencies(obs-polish-data obs-polish)
 
 # headless test harness: renders images through the filter with the installed OBS's libobs.
 # Built only when OBS is installed (not on CI, which builds the plugin alone).
 if(EXISTS "${OBS_APP}/Contents/Frameworks/libobs.framework")
   add_executable(render-test tests/render_test.m)
-  set_target_properties(render-test PROPERTIES OSX_ARCHITECTURES arm64 OSX_DEPLOYMENT_TARGET 13.0)
+  set_target_properties(render-test PROPERTIES OSX_ARCHITECTURES arm64)
+  # the installed libobs needs macOS 13; the test tool only ever runs on the build machine
+  target_compile_options(render-test PRIVATE -mmacosx-version-min=13.0)
+  target_link_options(render-test PRIVATE -mmacosx-version-min=13.0)
   target_include_directories(render-test PRIVATE "${CMAKE_SOURCE_DIR}/cmake" "${OBS_SRC}/libobs" "${CMAKE_SOURCE_DIR}/deps/simde")
   target_compile_options(render-test PRIVATE -fobjc-arc -Wno-deprecated-declarations)
   target_link_options(render-test PRIVATE -F${OBS_APP}/Contents/Frameworks -Wl,-rpath,${OBS_APP}/Contents/Frameworks)

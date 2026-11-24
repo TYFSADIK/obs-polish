@@ -1,8 +1,8 @@
 # Polish for OBS
 
 Free, open-source beauty and camera effects for [OBS Studio](https://obsproject.com) on macOS:
-skin smoothing, brightening, face shape, colour looks, background blur or replacement, and
-face-tracked stickers. Everything runs on your Mac; nothing is uploaded, there is no account,
+skin smoothing, brightening, face shape, makeup, colour looks, background blur or replacement,
+and face-tracked stickers. Everything runs on your Mac; nothing is uploaded, there is no account,
 and there is no watermark.
 
 ![Original and with Polish: smoothing, brightening, the Golden look and background blur](docs/img/hero.jpg)
@@ -11,9 +11,10 @@ and there is no watermark.
 | --- | --- |
 | **Beauty** | edge-preserving skin smoothing, limited to skin inside the tracked face; brightening that keeps skin's own colour; sharpening |
 | **Face shape** | slimmer jaw and bigger eyes, driven by face landmarks |
-| **Colour** | 8 looks (Warm, Cool, Golden hour, Vivid, Pastel, Teal and orange, Mono, Film) with a strength slider; exposure, warmth, saturation |
-| **Background** | blur, solid colour (a green screen without the green screen), or your own image, with adjustable edge softness |
-| **Stickers** | sunglasses, crown, cat ears, halo, hearts, party hat; they follow the face and its tilt |
+| **Makeup** | lipstick and blush in any colour, teeth whitening, eye brightening |
+| **Colour** | 17 looks in groups: Portrait (Rosy, Fresh, Porcelain), Food (Appetizing), Landscape (Lush, Sunset), Modern (Cinematic, Noir, Vintage), and Warm, Cool, Golden hour, Vivid, Pastel, Teal and orange, Mono, Film; a strength slider; exposure, warmth, saturation, vignette, film grain |
+| **Background** | blur, solid colour (a green screen without the green screen), a built-in backdrop (Studio, Gradient, Bokeh lights, Sunset) or your own image, with adjustable edge softness |
+| **Stickers** | sunglasses, star glasses, crown, flower crown, cat ears, bunny ears, devil horns, halo, hearts, party hat; they follow the face and its tilt |
 | **Compare** | a checkbox, and a hotkey you hold to see the original |
 | **Languages** | follows OBS: English, French, Spanish, German, Portuguese, Chinese, Japanese, Korean |
 
@@ -38,28 +39,33 @@ Beauty at full strength (the default is gentler: smooth 45, brighten 20):
 
 ![Original, smoothing at 100, brightening at 100](docs/img/beauty.jpg)
 
+Makeup:
+
+![Original, lipstick, and lipstick with blush, teeth whitening and eye brightening](docs/img/makeup.jpg)
+
 Background:
 
-![Background blur, solid colour, and a replacement image](docs/img/background.jpg)
+![Background blur, solid colour, the Studio, Bokeh and Sunset backdrops, and your own image](docs/img/background.jpg)
 
-Looks:
+Looks (8 of 17), and vignette with grain:
 
-![Warm, Teal and orange, Mono and Film looks](docs/img/looks.jpg)
+![Rosy, Porcelain, Appetizing, Lush, Cinematic, Noir and Vintage looks, and Vintage with vignette and grain](docs/img/looks.jpg)
 
-Stickers:
+Stickers (6 of 10):
 
-![Sunglasses, halo and cat ears stickers](docs/img/stickers.jpg)
+![Sunglasses, star glasses, halo, flower crown, cat ears and devil horns stickers](docs/img/stickers.jpg)
 
 ## How it works
 
 ```
-camera frame ─┬─► smooth + brighten ─► face shape ─► background ─► look, tone, sharpen ─► sticker ─► OBS
-              │        ▲                    ▲              ▲                                ▲
-              └─► 384 px copy ─► Apple Vision (background thread): face landmarks, person mask
+camera frame ─┬─► smooth + brighten ─► makeup ─► face shape ─► background ─► look, tone, vignette, grain ─► sticker ─► OBS
+              │          ▲                ▲          ▲              ▲                                       ▲
+              └─► 384 px copy ─► Apple Vision (background thread): face landmarks, lips mask, person mask
 ```
 
-- **Analysis** uses Apple's Vision framework, which ships with macOS: face landmarks (about 8 ms
-  per frame) and person segmentation (about 15 to 20 ms). It runs on a background queue on a
+- **Analysis** uses Apple's Vision framework, which ships with macOS: face landmarks (about 8 to 12 ms
+  per frame) and person segmentation (about 15 to 20 ms). For makeup, the lip landmarks are
+  rasterised into a small lips and mouth-interior mask with Core Graphics. It runs on a background queue on a
   small copy of the frame, read back one frame late so the GPU never waits; if analysis is busy,
   the frame is skipped and the effects use the latest result. Landmarks are smoothed over time
   against jitter.
@@ -67,11 +73,13 @@ camera frame ─┬─► smooth + brighten ─► face shape ─► background 
   a skin-weighted bilateral filter inside an ellipse fitted to each face; a luminance curve that
   scales colour with brightness so skin keeps its hue; a displacement field from the jaw
   landmarks (an average of nearby control points, so they never stack) and a local zoom on each
-  eye; a separable Gaussian blur at quarter resolution; mask compositing; and a 64-step 3D LUT.
-- **Cost** at 1920 x 1080 on an M-series Mac: about 2 ms of GPU time per frame with every effect
-  on, on top of OBS's own work (pass-through 1.7 ms, defaults 3.0 ms, everything 3.9 ms in the
-  benchmark below).
-- **Assets** (looks and stickers) are generated by [`tools/make_assets.py`](tools/make_assets.py);
+  eye; soft-light lipstick from the lips mask, blush ellipses placed from the cheek landmarks, teeth
+  whitening limited to bright, unsaturated pixels inside the mouth; a separable Gaussian blur at
+  quarter resolution; mask compositing; a 64-step 3D LUT; vignette and grain.
+- **Cost** at 1920 x 1080 on an Apple silicon Mac: about 1.8 ms of GPU time per frame with every
+  effect on, on top of OBS's own work (pass-through 1.3 ms, defaults 2.1 ms, beauty with shape and
+  makeup 2.6 ms, everything 3.1 ms in the benchmark below).
+- **Assets** (looks, stickers and backdrops) are generated by [`tools/make_assets.py`](tools/make_assets.py);
   no third-party art is included.
 
 ## Build from source
@@ -90,7 +98,7 @@ With OBS installed in `/Applications`, the build also produces `render-test`, wh
 libobs headless, runs an image through the filter and writes the result:
 
 ```bash
-python3 tests/run_tests.py                     # 11 checks; renders go to tests/out/
+python3 tests/run_tests.py                     # 14 checks; renders go to tests/out/
 POLISH_BENCH=1 build/render-test build/obs-polish.plugin <image> out.png '{}' 130    # ms per frame
 ```
 
@@ -98,7 +106,9 @@ The checks: pass-through is bit-exact with everything off; the face is found wit
 landmarks; smoothing halves forehead detail and leaves the background untouched; brightening
 raises luminance without shifting hue; face shape changes only pixels near the face; background
 blur keeps the person and softens the background; solid colour fills it; an identity look changes
-nothing; Mono removes colour; a sticker lands above the eyes; compare shows the original exactly.
+nothing; Mono removes colour; a sticker lands above the eyes; lipstick reddens only pixels around
+the mouth; vignette darkens the corners and leaves the centre; a built-in backdrop replaces the
+background and leaves the face; compare shows the original exactly.
 
 Test portrait: Chris Hadfield, NASA (public domain).
 
@@ -107,7 +117,9 @@ Test portrait: Chris Hadfield, NASA (public domain).
 - macOS only: analysis uses Apple's Vision framework. A Windows or Linux port would need another
   landmark and segmentation model (for example MediaPipe through ONNX Runtime).
 - The person mask is one or two frames behind the picture, so fast movement can show a thin edge.
-- Face shape and stickers follow the largest face; beauty covers up to two faces.
+- Face shape, blush, eye brightening and stickers follow the largest face; smoothing and the
+  lips mask cover up to two faces.
+- A full moustache or beard can hide part of the upper lip from the lip landmarks.
 
 ## Related projects
 
@@ -124,6 +136,7 @@ src/            plugin entry, Tools menu, hotkey (plugin.c); the filter (polish-
 data/effects/   the shaders
 data/luts/      colour looks (generated)
 data/stickers/  stickers (generated)
+data/backgrounds/ backdrop presets (generated)
 data/locale/    translations
 tools/          asset generator
 tests/          headless libobs render harness and checks

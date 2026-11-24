@@ -4,6 +4,7 @@
 #import <Foundation/Foundation.h>
 #import <Vision/Vision.h>
 #import <CoreVideo/CoreVideo.h>
+#import <CoreGraphics/CoreGraphics.h>
 #include <math.h>
 #include <os/lock.h>
 #include <string.h>
@@ -23,6 +24,8 @@ struct pa {
 	struct pa_result res;
 	uint8_t *mask;
 	int mask_cap;
+	uint8_t *mouth;                 /* interleaved R (lips), G (mouth interior) */
+	int mouth_cap;
 	bool have_prev;
 };
 
@@ -46,6 +49,7 @@ void pa_destroy(void *ptr)
 	dispatch_sync(s.queue, ^{});      /* let any running analysis finish */
 	s = nil;
 	free(p->mask);
+	free(p->mouth);
 	free(p);
 }
 
@@ -114,7 +118,64 @@ static void smooth_face(struct pa_face *f, const struct pa_face *prev, float a)
 #undef S
 }
 
-bool pa_submit(void *ptr, const uint8_t *bgra, int w, int h, int stride, bool want_mask)
+static void add_region(CGContextRef ctx, VNFaceLandmarkRegion2D *r, int w, int h)
+{
+	if (!r || r.pointCount < 3)
+		return;
+	const CGPoint *pts = [r pointsInImageOfSize:CGSizeMake(w, h)];
+	CGContextMoveToPoint(ctx, pts[0].x, pts[0].y);
+	for (NSUInteger i = 1; i < r.pointCount; i++)
+		CGContextAddLineToPoint(ctx, pts[i].x, pts[i].y);
+	CGContextClosePath(ctx);
+}
+
+/* Lips (outer minus inner) and mouth interior for each face, rasterised at analysis resolution.
+ * Vision's points have their origin at the bottom left, as does a CGBitmapContext, whose memory
+ * starts at the top row: so the bytes come out top-down, like the frame. */
+static uint8_t *mouth_mask(NSArray<VNFaceObservation *> *faces, int w, int h)
+{
+	CGColorSpaceRef gray = CGColorSpaceCreateDeviceGray();
+	uint8_t *lips = calloc((size_t)w * h, 1), *inner = calloc((size_t)w * h, 1);
+	CGContextRef a = CGBitmapContextCreate(lips, w, h, 8, w, gray, (CGBitmapInfo)kCGImageAlphaNone);
+	CGContextRef b = CGBitmapContextCreate(inner, w, h, 8, w, gray, (CGBitmapInfo)kCGImageAlphaNone);
+	CGContextSetGrayFillColor(a, 1, 1);
+	CGContextSetGrayFillColor(b, 1, 1);
+	int n = 0;
+	for (VNFaceObservation *o in faces) {
+		if (n++ >= PA_MAX_FACES || !o.landmarks)
+			break;
+		add_region(a, o.landmarks.outerLips, w, h);
+		add_region(a, o.landmarks.innerLips, w, h);
+		CGContextEOFillPath(a);
+		add_region(b, o.landmarks.innerLips, w, h);
+		CGContextFillPath(b);
+	}
+	CGContextRelease(a);
+	CGContextRelease(b);
+	CGColorSpaceRelease(gray);
+	uint8_t *out = malloc((size_t)w * h * 2);
+	/* 3x3 box blur for soft edges */
+	for (int y = 0; y < h; y++)
+		for (int x = 0; x < w; x++) {
+			int sa = 0, sb = 0, c = 0;
+			for (int dy = -1; dy <= 1; dy++)
+				for (int dx = -1; dx <= 1; dx++) {
+					int xx = x + dx, yy = y + dy;
+					if (xx < 0 || yy < 0 || xx >= w || yy >= h)
+						continue;
+					sa += lips[yy * w + xx];
+					sb += inner[yy * w + xx];
+					c++;
+				}
+			out[(y * w + x) * 2] = (uint8_t)(sa / c);
+			out[(y * w + x) * 2 + 1] = (uint8_t)(sb / c);
+		}
+	free(lips);
+	free(inner);
+	return out;
+}
+
+bool pa_submit(void *ptr, const uint8_t *bgra, int w, int h, int stride, int want)
 {
 	struct pa *p = ptr;
 	PAState *s = (__bridge PAState *)p->state;
@@ -189,7 +250,11 @@ bool pa_submit(void *ptr, const uint8_t *bgra, int w, int h, int stride, bool wa
 				f->roll = atan2f((f->eye_r.y - f->eye_l.y) / r.aspect, f->eye_r.x - f->eye_l.x);
 				r.nfaces++;
 			}
+			uint8_t *mouth = NULL;
+			if ((want & PA_WANT_MOUTH) && r.nfaces > 0)
+				mouth = mouth_mask(obs, w, h);
 			uint8_t *mask = NULL;
+			bool want_mask = want & PA_WANT_PERSON;
 			if (want_mask) {
 				NSDate *t1 = [NSDate date];
 				VNGeneratePersonSegmentationRequest *seg = [VNGeneratePersonSegmentationRequest new];
@@ -218,6 +283,19 @@ bool pa_submit(void *ptr, const uint8_t *bgra, int w, int h, int stride, bool wa
 					smooth_face(&r.faces[i], &p->res.faces[i], 0.55f);
 			r.seq = p->res.seq + 1;
 			r.mask_seq = p->res.mask_seq;
+			r.mouth_seq = p->res.mouth_seq;
+			if (mouth) {
+				int need = w * h * 2;
+				if (need > p->mouth_cap) {
+					p->mouth = realloc(p->mouth, need);
+					p->mouth_cap = need;
+				}
+				memcpy(p->mouth, mouth, need);
+				free(mouth);
+				r.mouth_w = w;
+				r.mouth_h = h;
+				r.mouth_seq++;
+			}
 			if (mask) {
 				int need = r.mask_w * r.mask_h;
 				if (need > p->mask_cap) {
@@ -242,13 +320,15 @@ bool pa_submit(void *ptr, const uint8_t *bgra, int w, int h, int stride, bool wa
 	return true;
 }
 
-bool pa_get(void *ptr, struct pa_result *out, uint8_t *mask_buf, int cap)
+bool pa_get(void *ptr, struct pa_result *out, uint8_t *mask_buf, int cap, uint8_t *mouth_buf, int mouth_cap)
 {
 	struct pa *p = ptr;
 	os_unfair_lock_lock(&p->lock);
 	*out = p->res;
 	if (mask_buf && p->mask && out->mask_w * out->mask_h <= cap)
 		memcpy(mask_buf, p->mask, (size_t)out->mask_w * out->mask_h);
+	if (mouth_buf && p->mouth && out->mouth_w * out->mouth_h * 2 <= mouth_cap)
+		memcpy(mouth_buf, p->mouth, (size_t)out->mouth_w * out->mouth_h * 2);
 	os_unfair_lock_unlock(&p->lock);
 	return out->seq > 0;
 }

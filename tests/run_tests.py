@@ -125,8 +125,30 @@ def main():
     check("sticker", len(ys) > 500 and np.median(ys) < eye_y and ys.max() < H * 0.5,
           f"{len(ys)} pixels, median row {np.median(ys):.0f} (eyes at {eye_y:.0f})")
 
-    # 9. compare shows the original
-    cmp_, _ = render("compare", {"compare": True, "smooth": 100, "look": "mono"}, frames=5)
+    # 9. lipstick changes only pixels around the mouth, and makes them redder
+    lp, info = render("lipstick", {**OFF, "lipstick": 100})
+    changed = np.abs(lp - src).max(axis=2) > 6
+    ys, xs = np.nonzero(changed)
+    mouth_y = (f["chin"][1] * H + max(f["eye_l"][1], f["eye_r"][1]) * H) / 2 + 0.15 * (f["chin"][1] - f["eye_l"][1]) * H
+    redder = (lp[changed][:, 0] - lp[changed][:, 2]).mean() - (src[changed][:, 0] - src[changed][:, 2]).mean() if len(ys) else 0
+    check("lipstick", info["mouth"][0] > 0 and len(ys) > 50 and abs(np.median(ys) - mouth_y) < 0.25 * fh * H
+          and ys.min() > max(f["eye_l"][1], f["eye_r"][1]) * H and redder > 5,
+          f"mouth mask {info['mouth']}, {len(ys)} pixels around row {np.median(ys):.0f} (mouth about {mouth_y:.0f}), red-blue +{redder:.1f}")
+
+    # 10. vignette darkens the corners, not the centre
+    vg, _ = render("vignette", {**OFF, "vignette": 100}, frames=5)
+    corner_d = region(src, (0, 0, 80, 80)).mean() - region(vg, (0, 0, 80, 80)).mean()
+    centre_d = np.abs(region(src, (430, 550, 530, 650)) - region(vg, (430, 550, 530, 650))).mean()
+    check("vignette", corner_d > 20 and centre_d < 1, f"corner darker by {corner_d:.1f}, centre change {centre_d:.2f}")
+
+    # 11. a built-in background preset replaces the background
+    bp, _ = render("bg_preset", {**OFF, "bg_mode": 2, "bg_preset": "bokeh"}, frames=30)
+    flag_change = np.abs(region(bp, flag) - region(src, flag)).mean()
+    check("background preset", flag_change > 40 and np.abs(region(bp, person) - region(src, person)).mean() < 4,
+          f"flag region changed by {flag_change:.1f} on average; face unchanged")
+
+    # 12. compare shows the original
+    cmp_, _ = render("compare", {"compare": True, "smooth": 100, "look": "mono", "lipstick": 100, "vignette": 100}, frames=5)
     check("compare", np.abs(cmp_ - src).max() == 0, f"max difference {np.abs(cmp_ - src).max()}")
 
     failed = [n for n, ok, _ in results if not ok]

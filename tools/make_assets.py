@@ -1,4 +1,4 @@
-"""Generates every bundled asset: colour-look LUTs and stickers. Everything is drawn here from
+"""Generates every bundled asset: colour-look LUTs, stickers and background presets. Everything is drawn here from
 code, so the repository contains no third-party art.
 
     python3 tools/make_assets.py            (needs numpy and pillow)
@@ -58,7 +58,27 @@ LOOKS = {
     "tealorange": lambda c: split_tone(sat(curve(c, contrast=0.2), 1.1), [-0.06, 0.02, 0.08], [0.08, 0.02, -0.06], 1.0),
     "mono": lambda c: np.repeat(curve(luma(c), contrast=0.25)[..., None], 3, axis=2),
     "film": lambda c: split_tone(sat(curve(c, lift=0.06, gain=0.96, contrast=0.2), 0.85), [0.0, 0.03, 0.04], [0.05, 0.03, -0.02], 1.0),
+    # portrait
+    "rosy": lambda c: split_tone(curve(c, lift=0.03, contrast=0.05), [0.03, 0.0, 0.02], [0.06, 0.01, 0.03], 0.8) * [1.02, 0.99, 1.0],
+    "fresh": lambda c: sat(curve(c, lift=0.04, gain=1.03), 1.08) * [0.99, 1.01, 1.02],
+    "porcelain": lambda c: sat(curve(c, lift=0.08, gain=1.04, contrast=-0.05), 0.8) * [1.0, 1.0, 1.03],
+    # food
+    "tasty": lambda c: split_tone(sat(curve(c, contrast=0.25), 1.25), [0.0, 0.0, -0.02], [0.06, 0.03, -0.05], 0.9),
+    # landscape
+    "lush": lambda c: green_boost(sat(curve(c, contrast=0.2), 1.15)),
+    "sunset": lambda c: split_tone(sat(curve(c, contrast=0.2), 1.12), [-0.02, -0.02, 0.06], [0.14, 0.05, -0.08], 0.9),
+    # modern
+    "cinematic": lambda c: split_tone(sat(curve(c, lift=0.04, gain=0.95, contrast=0.3), 0.9), [-0.04, 0.03, 0.07], [0.07, 0.03, -0.04], 1.0),
+    "noir": lambda c: np.repeat(curve(luma(c), lift=-0.0, gamma=1.15, contrast=0.55)[..., None], 3, axis=2),
+    "vintage": lambda c: split_tone(sat(curve(c, lift=0.1, gain=0.92, contrast=0.1), 0.7), [0.04, 0.02, -0.02], [0.08, 0.05, -0.06], 1.0),
 }
+
+
+def green_boost(c):
+    """more saturation in greens and blues (foliage, sky), less on skin"""
+    g = np.clip((c[..., 1] - c[..., 0]) * 3, 0, 1)[..., None]
+    b = np.clip((c[..., 2] - c[..., 0]) * 3, 0, 1)[..., None]
+    return sat(c, 1.0) * (1 - 0.6 * (g + b) / 2) + sat(c, 1.5) * (0.6 * (g + b) / 2)
 
 
 def write_luts():
@@ -194,13 +214,116 @@ def partyhat():
     finish(im, "partyhat")
 
 
+def star(d, cx, cy, r, color, k=S):
+    pts = []
+    for i in range(10):
+        a = -math.pi / 2 + i * math.pi / 5
+        rr = r if i % 2 == 0 else r * 0.45
+        pts.append(((cx + rr * math.cos(a)) * k, (cy + rr * math.sin(a)) * k))
+    d.polygon(pts, fill=color)
+
+
+def starglasses():
+    w, h = 640, 240
+    im = canvas(w, h)
+    d = ImageDraw.Draw(im)
+    for cx in (160, 480):
+        star(d, cx, 125, 120, (255, 205, 40, 255))
+        star(d, cx, 125, 84, (255, 120, 170, 235))
+    d.rounded_rectangle([270 * S, 100 * S, 370 * S, 122 * S], radius=10 * S, fill=(255, 205, 40, 255))
+    finish(im, "starglasses")
+
+
+def bunnyears():
+    w, h = 520, 520
+    im = canvas(w, h)
+    d = ImageDraw.Draw(im)
+    for cx, tilt in ((180, 10), (340, -10)):  # PIL rotates counter-clockwise: lean the tops apart
+        ear = canvas(w, h)
+        e = ImageDraw.Draw(ear)
+        e.ellipse([(cx - 70) * S, 20 * S, (cx + 70) * S, 500 * S], fill=(250, 250, 252, 255))
+        e.ellipse([(cx - 38) * S, 70 * S, (cx + 38) * S, 450 * S], fill=(250, 175, 195, 255))
+        ear = ear.rotate(tilt, center=(cx * S, 480 * S), resample=Image.BICUBIC)
+        im.alpha_composite(ear)
+    finish(im, "bunnyears")
+
+
+def devilhorns():
+    w, h = 640, 260
+    im = canvas(w, h)
+    d = ImageDraw.Draw(im)
+    for side in (-1, 1):
+        base = 320 + side * 215
+        pts = [(base - 55, 250), (base + side * 70, 10), (base + 55, 250)]
+        tip = [(base - 55, 250), (base + side * 25, 120), (base + side * 70, 10), (base + 55, 250)]
+        d.polygon([(x * S, y * S) for x, y in tip], fill=(200, 30, 40, 255))
+        d.polygon([(x * S, y * S) for x, y in [(base - 20, 250), (base + side * 50, 60), (base + 15, 250)]], fill=(235, 70, 70, 255))
+    finish(im, "devilhorns")
+
+
+def flowercrown():
+    w, h = 720, 240
+    im = canvas(w, h)
+    d = ImageDraw.Draw(im)
+    pts = [(60 + i * 600 / 20, 170 - 70 * math.sin(math.pi * i / 20)) for i in range(21)]
+    d.line([(x * S, y * S) for x, y in pts], fill=(70, 130, 60, 255), width=16 * S)
+    for i, (x, y) in enumerate(pts[::3]):
+        col = [(255, 140, 170), (255, 210, 90), (200, 150, 255), (255, 255, 255)][i % 4]
+        for k in range(5):
+            a = 2 * math.pi * k / 5 + i
+            px, py = x + 26 * math.cos(a), y + 26 * math.sin(a)
+            d.ellipse([(px - 22) * S, (py - 22) * S, (px + 22) * S, (py + 22) * S], fill=col + (255,))
+        d.ellipse([(x - 14) * S, (y - 14) * S, (x + 14) * S, (y + 14) * S], fill=(250, 190, 60, 255))
+    for x, y in pts[1::3]:
+        d.ellipse([(x - 26) * S, (y - 12) * S, (x + 26) * S, (y + 12) * S], fill=(90, 160, 80, 255))
+    finish(im, "flowercrown")
+
+
 def write_stickers():
     (ROOT / "stickers").mkdir(parents=True, exist_ok=True)
-    for fn in (sunglasses, crown, catears, halo, hearts, partyhat):
+    for fn in (sunglasses, crown, catears, halo, hearts, partyhat, starglasses, bunnyears, devilhorns, flowercrown):
         fn()
+
+
+# ---------------------------------------------------------------- background presets
+
+def write_backgrounds():
+    out = ROOT / "backgrounds"
+    out.mkdir(parents=True, exist_ok=True)
+    w, h = 1920, 1080
+    y, x = np.mgrid[0:h, 0:w] / h
+    rng = np.random.default_rng(7)
+
+    def save(arr, name, blur=0):
+        im = Image.fromarray(np.clip(arr, 0, 255).astype(np.uint8))
+        if blur:
+            im = im.filter(ImageFilter.GaussianBlur(blur))
+        im.save(out / f"{name}.jpg", quality=88)
+
+    # studio: a grey backdrop lit from the middle
+    r = np.hypot(x - w / h / 2, y - 0.45)
+    v = 150 - 85 * np.clip(r / 1.1, 0, 1) ** 1.4
+    save(np.dstack([v, v, v * 1.03]), "studio")
+    # gradient: soft blue to peach
+    t = np.clip((x / (w / h) + y) / 2, 0, 1)[..., None]
+    save(np.array([45, 75, 130]) + (np.array([230, 160, 130]) - [45, 75, 130]) * t, "gradient")
+    # bokeh: out-of-focus lights over dark blue
+    base = Image.fromarray(np.dstack([np.full((h, w), 18), np.full((h, w), 22), np.full((h, w), 40)]).astype(np.uint8))
+    d = ImageDraw.Draw(base, "RGBA")
+    for _ in range(90):
+        cx, cy, rr = rng.uniform(0, w), rng.uniform(0, h), rng.uniform(25, 110)
+        col = [(255, 200, 120), (255, 150, 170), (140, 190, 255), (255, 240, 200)][rng.integers(4)]
+        d.ellipse([cx - rr, cy - rr, cx + rr, cy + rr], fill=col + (int(rng.uniform(40, 120)),))
+    base.filter(ImageFilter.GaussianBlur(10)).save(out / "bokeh.jpg", quality=88)
+    # sunset: sky gradient with a low sun
+    sky = np.array([60, 60, 120]) + (np.array([255, 150, 90]) - [60, 60, 120]) * np.clip(y * 1.4, 0, 1)[..., None]
+    sun = np.exp(-(((x - w / h * 0.62) ** 2 + (y - 0.72) ** 2) / 0.01))[..., None] * np.array([255, 220, 150]) * 0.9
+    ground = (y > 0.78)[..., None] * (np.array([35, 25, 40]) - sky)
+    save(sky + sun + ground, "sunset", blur=2)
 
 
 if __name__ == "__main__":
     write_luts()
     write_stickers()
+    write_backgrounds()
     print("assets written to", ROOT)

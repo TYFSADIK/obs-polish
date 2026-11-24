@@ -1,0 +1,234 @@
+// Polish for OBS: all passes. Original work, MIT licence.
+uniform float4x4 ViewProj;
+uniform texture2d image;
+uniform texture2d mask_tex;
+uniform texture2d bg_tex;
+uniform texture2d lut_tex;
+
+uniform float2 size;          // frame size in pixels
+uniform float2 texel;         // 1 / size
+
+// beauty
+uniform float smooth_amt;     // 0..1
+uniform float smooth_radius;  // pixels
+uniform float brighten;       // 0..1
+uniform float face_count;     // 0, 1 or 2
+uniform float4 face0;         // centre x, y (uv), radius x, y (uv)
+uniform float4 face1;
+uniform float face0_roll;
+uniform float face1_roll;
+uniform float no_face_level;  // smoothing level on skin when no face is tracked
+
+// face shape (pixels)
+uniform float4 ctl0;          // control point x, y and displacement x, y
+uniform float4 ctl1;
+uniform float4 ctl2;
+uniform float4 ctl3;
+uniform float4 ctl4;
+uniform float4 ctl5;
+uniform float ctl_radius;
+uniform float4 eye0;          // centre x, y, radius, strength
+uniform float4 eye1;
+
+// background
+uniform float bg_mode;        // 1 blur, 2 image, 3 colour
+uniform float4 bg_color;
+uniform float4 bg_uv;         // scale x, y, offset x, y (cover fit)
+uniform float edge_lo;
+uniform float edge_hi;
+
+// blur
+uniform float2 blur_step;
+
+// grade
+uniform float lut_amt;
+uniform float exposure;       // -0.5..0.5
+uniform float warmth;         // -1..1
+uniform float saturation;     // -1..1
+uniform float sharpen;        // 0..1
+
+sampler_state linear_clamp {
+	Filter   = Linear;
+	AddressU = Clamp;
+	AddressV = Clamp;
+};
+
+struct VertData {
+	float4 pos : POSITION;
+	float2 uv  : TEXCOORD0;
+};
+
+VertData VSDefault(VertData v_in)
+{
+	VertData v_out;
+	v_out.pos = mul(float4(v_in.pos.xyz, 1.0), ViewProj);
+	v_out.uv  = v_in.uv;
+	return v_out;
+}
+
+float luma(float3 c) { return dot(c, float3(0.299, 0.587, 0.114)); }
+
+// Skin likelihood from chroma (YCbCr), soft-edged.
+float skin_prob(float3 c)
+{
+	float y  = luma(c);
+	float cb = 0.5 - 0.168736 * c.r - 0.331264 * c.g + 0.5 * c.b;
+	float cr = 0.5 + 0.5 * c.r - 0.418688 * c.g - 0.081312 * c.b;
+	float a = smoothstep(0.26, 0.31, cb) * (1.0 - smoothstep(0.50, 0.55, cb));
+	float b = smoothstep(0.515, 0.545, cr) * (1.0 - smoothstep(0.68, 0.72, cr));
+	return a * b * smoothstep(0.10, 0.20, y);
+}
+
+float ellipse_weight(float2 uv, float4 f, float roll)
+{
+	float2 d = (uv - f.xy) * size;
+	float cs = cos(roll), sn = sin(roll);
+	float2 r = float2(cs * d.x + sn * d.y, -sn * d.x + cs * d.y);
+	float2 rad = f.zw * size;
+	float e = length(r / rad);
+	return 1.0 - smoothstep(0.85, 1.15, e);
+}
+
+float face_weight(float2 uv)
+{
+	if (face_count < 0.5)
+		return no_face_level;
+	float w = ellipse_weight(uv, face0, face0_roll);
+	if (face_count > 1.5)
+		w = max(w, ellipse_weight(uv, face1, face1_roll));
+	return w;
+}
+
+// Edge-preserving smoothing: 3 rings of 8 samples, weighted by distance and colour difference.
+float4 PSSmooth(VertData v_in) : TARGET
+{
+	float4 c = image.Sample(linear_clamp, v_in.uv);
+	float region = skin_prob(c.rgb) * face_weight(v_in.uv);
+	float m = smooth_amt * region;
+	float3 acc = c.rgb;
+	float wsum = 1.0;
+	if (m > 0.002) {
+		for (int ring = 1; ring <= 3; ring++) {
+			float rr = smooth_radius * float(ring) / 3.0;
+			float ws = exp(-float(ring * ring) / 6.0);
+			for (int k = 0; k < 8; k++) {
+				float a = (float(k) + 0.5 * float(ring)) * 0.785398;
+				float2 o = float2(cos(a), sin(a)) * rr * texel;
+				float3 s = image.Sample(linear_clamp, v_in.uv + o).rgb;
+				float3 d = s - c.rgb;
+				float wr = exp(-dot(d, d) / 0.0072);
+				acc += s * ws * wr;
+				wsum += ws * wr;
+			}
+		}
+	}
+	float3 sm = acc / wsum;
+	// keep a little of the fine texture even at full strength, so skin never looks like plastic
+	float3 outc = lerp(c.rgb, sm, m * 0.82);
+	// brighten: raise luminance along a soft curve and scale the colour with it, so skin keeps its hue
+	float y0 = max(luma(outc), 1e-3);
+	float lift = brighten * region * 0.35;
+	float y1 = y0 + lift * y0 * (1.0 - y0) * 1.6;
+	outc = saturate(outc * (y1 / y0));
+	return float4(outc, c.a);
+}
+
+// Face slimming: each jaw control point carries a displacement; the field at any pixel is the
+// falloff-weighted average of nearby displacements (not their sum, so overlapping points never stack),
+// faded out smoothly at ctl_radius. Applied as an inverse map, so the output has no holes.
+float ctl_weight(float2 pos, float4 ctl)
+{
+	float2 rel = pos - ctl.xy;
+	float t = saturate(1.0 - dot(rel, rel) / (ctl_radius * ctl_radius));
+	return t * t;
+}
+
+float2 jaw_shift(float2 pos)
+{
+	float w0 = ctl_weight(pos, ctl0), w1 = ctl_weight(pos, ctl1), w2 = ctl_weight(pos, ctl2);
+	float w3 = ctl_weight(pos, ctl3), w4 = ctl_weight(pos, ctl4), w5 = ctl_weight(pos, ctl5);
+	float sum = w0 + w1 + w2 + w3 + w4 + w5;
+	float2 d = w0 * ctl0.zw + w1 * ctl1.zw + w2 * ctl2.zw + w3 * ctl3.zw + w4 * ctl4.zw + w5 * ctl5.zw;
+	return pos - d / max(sum, 1.0);
+}
+
+float2 local_zoom(float2 pos, float4 eye)
+{
+	float2 rel = pos - eye.xy;
+	float t = saturate(dot(rel, rel) / max(eye.z * eye.z, 1e-6));
+	return eye.xy + rel * (1.0 - eye.w * (1.0 - t));
+}
+
+float4 PSWarp(VertData v_in) : TARGET
+{
+	float2 pos = v_in.uv * size;
+	pos = jaw_shift(pos);
+	pos = local_zoom(pos, eye0);
+	pos = local_zoom(pos, eye1);
+	return image.Sample(linear_clamp, pos * texel);
+}
+
+float4 PSBlur(VertData v_in) : TARGET
+{
+	float4 s = image.Sample(linear_clamp, v_in.uv) * 0.2270270;
+	s += image.Sample(linear_clamp, v_in.uv + blur_step * 1.3846154) * 0.3162162;
+	s += image.Sample(linear_clamp, v_in.uv - blur_step * 1.3846154) * 0.3162162;
+	s += image.Sample(linear_clamp, v_in.uv + blur_step * 3.2307692) * 0.0702703;
+	s += image.Sample(linear_clamp, v_in.uv - blur_step * 3.2307692) * 0.0702703;
+	return s;
+}
+
+float4 PSComposite(VertData v_in) : TARGET
+{
+	float4 fg = image.Sample(linear_clamp, v_in.uv);
+	float m = smoothstep(edge_lo, edge_hi, mask_tex.Sample(linear_clamp, v_in.uv).r);
+	float3 bg;
+	if (bg_mode < 1.5)
+		bg = bg_tex.Sample(linear_clamp, v_in.uv).rgb;
+	else if (bg_mode < 2.5)
+		bg = bg_tex.Sample(linear_clamp, v_in.uv * bg_uv.xy + bg_uv.zw).rgb;
+	else
+		bg = bg_color.rgb;
+	return float4(lerp(bg, fg.rgb, m), fg.a);
+}
+
+float3 lut_sample(float3 c)
+{
+	float b = saturate(c.b) * 63.0;
+	float s1 = floor(b);
+	float s2 = min(s1 + 1.0, 63.0);
+	float2 t1 = float2(s1 - floor(s1 / 8.0) * 8.0, floor(s1 / 8.0)) / 8.0;
+	float2 t2 = float2(s2 - floor(s2 / 8.0) * 8.0, floor(s2 / 8.0)) / 8.0;
+	float2 rg = 0.5 / 512.0 + (63.0 / 512.0) * saturate(c.rg);
+	float3 a = lut_tex.Sample(linear_clamp, t1 + rg).rgb;
+	float3 d = lut_tex.Sample(linear_clamp, t2 + rg).rgb;
+	return lerp(a, d, b - s1);
+}
+
+float4 PSGrade(VertData v_in) : TARGET
+{
+	float4 c = image.Sample(linear_clamp, v_in.uv);
+	float3 rgb = c.rgb;
+	if (sharpen > 0.0) {
+		float3 n = image.Sample(linear_clamp, v_in.uv + float2(texel.x, 0.0)).rgb
+			 + image.Sample(linear_clamp, v_in.uv - float2(texel.x, 0.0)).rgb
+			 + image.Sample(linear_clamp, v_in.uv + float2(0.0, texel.y)).rgb
+			 + image.Sample(linear_clamp, v_in.uv - float2(0.0, texel.y)).rgb;
+		rgb = rgb + sharpen * 1.2 * (rgb - n * 0.25);
+	}
+	rgb = rgb * exp2(exposure * 2.0);
+	rgb.r += warmth * 0.06;
+	rgb.b -= warmth * 0.06;
+	float y = luma(rgb);
+	rgb = lerp(float3(y, y, y), rgb, 1.0 + saturation);
+	rgb = saturate(rgb);
+	if (lut_amt > 0.0)
+		rgb = lerp(rgb, lut_sample(rgb), lut_amt);
+	return float4(rgb, c.a);
+}
+
+technique Smooth    { pass { vertex_shader = VSDefault(v_in); pixel_shader = PSSmooth(v_in); } }
+technique Warp      { pass { vertex_shader = VSDefault(v_in); pixel_shader = PSWarp(v_in); } }
+technique Blur      { pass { vertex_shader = VSDefault(v_in); pixel_shader = PSBlur(v_in); } }
+technique Composite { pass { vertex_shader = VSDefault(v_in); pixel_shader = PSComposite(v_in); } }
+technique Grade     { pass { vertex_shader = VSDefault(v_in); pixel_shader = PSGrade(v_in); } }

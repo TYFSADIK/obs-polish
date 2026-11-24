@@ -1,0 +1,24 @@
+name: build
+on:
+  push:
+  pull_request:
+jobs:
+  macos:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build (universal)
+        run: ./scripts/build.sh
+      - name: Check the bundle
+        run: |
+          lipo -info build/obs-polish.plugin/Contents/MacOS/obs-polish
+          test -f build/obs-polish.plugin/Contents/Resources/effects/polish.effect
+          ls build/obs-polish.plugin/Contents/Resources/luts build/obs-polish.plugin/Contents/Resources/stickers
+      - name: Exported module entry points
+        run: nm -gU build/obs-polish.plugin/Contents/MacOS/obs-polish | grep -E 'obs_module_load|obs_module_set_pointer|obs_module_ver'
+      - name: Package
+        run: ./scripts/package.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: obs-polish-macos
+          path: dist/*.zip

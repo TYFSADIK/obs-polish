@@ -1,0 +1,6 @@
+build/
+dist/
+deps/
+tests/out/
+.DS_Store
+__pycache__/

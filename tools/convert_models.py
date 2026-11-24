@@ -31,8 +31,11 @@ MODELS = {
     # name: (sha256 of the official .tflite, input size, input range)
     "face_detection_short_range": ("3bc182eb9f33925d9e58b5c8d59308a760f4adea8f282370e428c51212c26633", 128, (-1, 1)),
     "face_landmark": ("1055cb9d4a9ca8b8c688902a3a5194311138ba256bcc94e336d8373a5f30c814", 192, (0, 1)),
-    "selfie_segmentation": ("9ee168ec7c8f2a16c56fe8e1cfbc514974cbbb7e434051b455635f1bd1462f5c", 256, (0, 1)),
 }
+# Google's selfie segmentation uses a MediaPipe-only operator (Convolution2DTransposeBias) that no
+# converter handles; onnx-community publishes an ONNX re-implementation with Google's weights.
+SEG_URL = "https://huggingface.co/onnx-community/mediapipe_selfie_segmentation/resolve/main/onnx/model.onnx"
+SEG_SHA = "3241ac4ad8aa35bdaf33946776db29f7c283a413aa0b0dacb9483594b4531aad"
 
 
 def inputs(size, lo, hi):
@@ -58,7 +61,7 @@ def main():
                 sys.exit(f"{name}: checksum {digest} does not match the pinned {sha}")
             onnx_path = OUT / f"{name}.onnx"
             subprocess.run([sys.executable, "-m", "tf2onnx.convert", "--tflite", str(tfl), "--output", str(onnx_path),
-                            "--opset", "13"], check=True, capture_output=True)
+                            "--opset", "15"], check=True, capture_output=True)
 
             lite = Interpreter(model_path=str(tfl))
             lite.allocate_tensors()
@@ -76,12 +79,19 @@ def main():
             rows.append((name, digest, onnx_path.stat().st_size, worst))
             print(f"{name}: {onnx_path.stat().st_size} bytes, largest relative difference from the original {worst:.2e}")
 
+    seg = OUT / "selfie_segmentation.onnx"
+    urllib.request.urlretrieve(SEG_URL, seg)
+    digest = hashlib.sha256(seg.read_bytes()).hexdigest()
+    if digest != SEG_SHA:
+        sys.exit(f"selfie_segmentation: checksum {digest} does not match the pinned {SEG_SHA}")
+    print(f"selfie_segmentation: {seg.stat().st_size} bytes from onnx-community")
+
     lines = [
         "# Where these models come from",
         "",
         "Google's MediaPipe models (Apache License 2.0), downloaded from Google's MediaPipe asset bucket",
         f"(`{BASE}`), checked against the SHA-256 below, and converted to ONNX with",
-        f"[tf2onnx](https://github.com/onnx/tensorflow-onnx) {tf2onnx.__version__} (opset 13) by `tools/convert_models.py`",
+        f"[tf2onnx](https://github.com/onnx/tensorflow-onnx) {tf2onnx.__version__} (opset 15) by `tools/convert_models.py`",
         f"on {date.today().isoformat()}. The script then runs the original and the converted model on the test",
         "portrait and on random inputs; the last column is the largest difference between them, relative",
         "to the output's range.",
@@ -90,6 +100,11 @@ def main():
         "| --- | --- | --- | --- |",
     ]
     lines += [f"| {n} | `{d}` | {b:,} | {w:.1e} |" for n, d, b, w in rows]
+    lines += ["", "`selfie_segmentation.onnx` is different: Google's model uses a MediaPipe-only operator",
+              "(Convolution2DTransposeBias) that no converter supports, so this is",
+              f"[onnx-community's ONNX version]({SEG_URL.replace('/resolve/main/onnx/model.onnx', '')}) of the same model",
+              f"(Apache License 2.0, re-implemented with Google's weights), downloaded and checked against SHA-256 `{SEG_SHA}`.",
+              "It is checked by the background tests instead of an output comparison."]
     lines += ["", "Model cards: [face detection](https://storage.googleapis.com/mediapipe-assets/MediaPipe%20BlazeFace%20Model%20Card%20(Short%20Range).pdf),",
               "[face mesh](https://storage.googleapis.com/mediapipe-assets/Model%20Card%20MediaPipe%20Face%20Mesh.pdf),",
               "[selfie segmentation](https://storage.googleapis.com/mediapipe-assets/Model%20Card%20MediaPipe%20Selfie%20Segmentation.pdf).", ""]

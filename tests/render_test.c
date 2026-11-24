@@ -9,6 +9,7 @@
  *   POLISH_IMAGE_SOURCE_BIN    OBS's image-source plugin binary
  *   POLISH_IMAGE_SOURCE_DATA   its data directory
  *   POLISH_BENCH=1             no sleeping, wait for the GPU every frame, print ms per frame
+ * Settings "none" renders the source without the filter: the baseline OBS itself would show.
  * With --json the filter's analysis state (faces found, landmark positions) is printed. */
 #include <obs.h>
 #include <obs-module.h>
@@ -127,14 +128,18 @@ int main(int argc, char **argv)
 	obs_data_set_string(is, "file", in);
 	obs_source_t *source = obs_source_create("image_source", "photo", is, NULL);
 	obs_data_release(is);
-	obs_data_t *fs = obs_data_create_from_json(json);
-	obs_source_t *filter = obs_source_create("polish_filter", "polish", fs, NULL);
-	obs_data_release(fs);
-	if (!filter) {
-		fprintf(stderr, "filter not registered\n");
-		return 6;
+	bool baseline = strcmp(json, "none") == 0;
+	obs_source_t *filter = NULL;
+	if (!baseline) {
+		obs_data_t *fs = obs_data_create_from_json(json);
+		filter = obs_source_create("polish_filter", "polish", fs, NULL);
+		obs_data_release(fs);
+		if (!filter) {
+			fprintf(stderr, "filter not registered\n");
+			return 6;
+		}
+		obs_source_filter_add(source, filter);
 	}
-	obs_source_filter_add(source, filter);
 	obs_set_output_source(0, source); /* makes the source active, so it ticks and renders */
 
 	gs_texrender_t *tr = NULL;
@@ -184,7 +189,7 @@ int main(int argc, char **argv)
 	gs_texrender_destroy(tr);
 	obs_leave_graphics();
 
-	if (dump) {
+	if (dump && filter) {
 		proc_handler_t *ph = obs_source_get_proc_handler(filter);
 		calldata_t cd = {0};
 		if (proc_handler_call(ph, "analysis_json", &cd))

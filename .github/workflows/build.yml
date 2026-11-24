@@ -56,6 +56,7 @@ jobs:
   # ------------------------------------------------------------------ Linux build (old glibc: runs on newer distros and in Flatpak)
   linux-build:
     strategy:
+      fail-fast: false
       matrix:
         include:
           - { runner: ubuntu-22.04, arch: x86_64, rid: linux-x64 }

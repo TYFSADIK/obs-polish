@@ -1,5 +1,8 @@
 /* Polish for OBS: beauty, face shape, colour looks, background and stickers.
  * Original open-source work; MIT licence. */
+#ifdef __linux__
+#define _GNU_SOURCE /* RTLD_DEFAULT */
+#endif
 #include <obs-module.h>
 #ifdef _WIN32
 #include <windows.h>

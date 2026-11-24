@@ -8,6 +8,9 @@
  * detector runs again when a face is lost and every DETECT_EVERY frames to pick up new ones.
  * ONNX Runtime is loaded at run time from a privately named copy next to the plugin, through
  * its single exported entry point, so it cannot clash with another plugin's copy. */
+#ifdef __linux__
+#define _GNU_SOURCE /* RTLD_DEFAULT */
+#endif
 #include <obs-module.h>
 #include <util/platform.h>
 #include <util/dstr.h>

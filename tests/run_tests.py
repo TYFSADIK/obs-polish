@@ -49,7 +49,8 @@ results = []
 
 def render(name, settings, frames=25, image=FACE):
     out = OUT / f"{name}.png"
-    r = subprocess.run([str(TOOL), str(PLUGIN_BIN), str(PLUGIN_DATA), str(image), str(out), json.dumps(settings), str(frames), "--json"],
+    arg = "none" if settings is None else json.dumps(settings)
+    r = subprocess.run([str(TOOL), str(PLUGIN_BIN), str(PLUGIN_DATA), str(image), str(out), arg, str(frames), "--json"],
                        capture_output=True, text=True, timeout=600)
     if r.returncode != 0:
         raise RuntimeError(f"{name}: render-test exited {r.returncode}\n{r.stderr[-2000:]}")
@@ -69,7 +70,11 @@ def region(img, box):
 
 def main():
     OUT.mkdir(exist_ok=True)
-    src = np.asarray(Image.open(FACE).convert("RGB")).astype(np.int32)
+    # The baseline is what OBS shows with no filter at all. Comparing against it, not the image
+    # file, separates the filter's effect from how a GPU or driver draws the image.
+    src, _ = render("baseline", None, frames=5)
+    raw = np.asarray(Image.open(FACE).convert("RGB")).astype(np.int32)
+    print(f"      this GPU draws the image within {np.abs(src - raw).max()} levels of the file")
     h, w = src.shape[:2]
 
     # 1. with every effect off, the filter must not change a single pixel
@@ -82,6 +87,9 @@ def main():
     f = info["face"][0] if info.get("faces") else None
     ok = bool(f) and f["eye_l"][0] < f["eye_r"][0] and f["eye_l"][1] < f["chin"][1] and abs(f["roll"]) < 0.2
     check("face tracking", ok, f"{info.get('faces')} face(s), analysis {info.get('face_ms')} ms")
+    if not ok:
+        print("\nno face found: the remaining checks need one")
+        sys.exit(1)
     W, H = w, h
     fx0, fy0, fw, fh = f["box"]
     face_box = (int(fx0 * W), int(fy0 * H), int((fx0 + fw) * W), int((fy0 + fh) * H))

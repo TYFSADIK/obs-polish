@@ -1,11 +1,15 @@
 """Renders the test portrait through the filter inside a real libobs and checks the results.
 
-    python3 tests/run_tests.py [build/obs-polish.plugin]      (needs numpy, pillow and OBS in /Applications)
+    python3 tests/run_tests.py [--install DIR]      (needs numpy and pillow, and OBS installed)
 
-Writes the renders to tests/out/ so they can be looked at.
+By default the plugin is taken from the build tree for this platform; --install points at an
+installed layout instead (DIR/obs-polish.plugin on macOS, DIR/obs-polish/{bin/64bit,data} elsewhere).
+render-test reads where OBS's own pieces are from POLISH_* environment variables (see
+tests/render_test.c). Writes the renders to tests/out/ so they can be looked at.
 """
 import json
 import os
+import platform
 import shutil
 import subprocess
 import sys
@@ -15,19 +19,38 @@ import numpy as np
 from PIL import Image
 
 ROOT = Path(__file__).resolve().parents[1]
-PLUGIN = Path(sys.argv[1]) if len(sys.argv) > 1 else ROOT / "build" / "obs-polish.plugin"
-TOOL = ROOT / "build" / "render-test"
 FACE = ROOT / "tests" / "images" / "face.png"
 OUT = ROOT / "tests" / "out"
 OFF = {"smooth": 0, "brighten": 0, "sharpen": 0}
+SYSTEM = platform.system()
+
+
+def plugin_paths():
+    install = sys.argv[sys.argv.index("--install") + 1] if "--install" in sys.argv else None
+    build = Path(os.environ.get("POLISH_BUILD", ROOT / "build"))
+    if SYSTEM == "Darwin":
+        bundle = Path(install) / "obs-polish.plugin" if install else build / "obs-polish.plugin"
+        return bundle / "Contents" / "MacOS" / "obs-polish", bundle / "Contents" / "Resources"
+    if install:
+        base = Path(install) / "obs-polish"
+        name = "obs-polish.dll" if SYSTEM == "Windows" else "obs-polish.so"
+        return base / "bin" / "64bit" / name, base / "data"
+    if SYSTEM == "Windows":
+        cfg = os.environ.get("POLISH_CONFIG", "Release")
+        return build / cfg / "obs-polish.dll", build / "data"
+    return build / "obs-polish.so", build / "data"
+
+
+PLUGIN_BIN, PLUGIN_DATA = plugin_paths()
+TOOL = Path(os.environ.get("POLISH_RENDER_TEST", ROOT / "build" / ("Release/render-test.exe" if SYSTEM == "Windows" else "render-test")))
 
 results = []
 
 
 def render(name, settings, frames=25, image=FACE):
     out = OUT / f"{name}.png"
-    r = subprocess.run([str(TOOL), str(PLUGIN), str(image), str(out), json.dumps(settings), str(frames), "--json"],
-                       capture_output=True, text=True, timeout=300)
+    r = subprocess.run([str(TOOL), str(PLUGIN_BIN), str(PLUGIN_DATA), str(image), str(out), json.dumps(settings), str(frames), "--json"],
+                       capture_output=True, text=True, timeout=600)
     if r.returncode != 0:
         raise RuntimeError(f"{name}: render-test exited {r.returncode}\n{r.stderr[-2000:]}")
     info = next((json.loads(l) for l in r.stdout.splitlines() if l.startswith("{")), {})
@@ -55,6 +78,7 @@ def main():
 
     # 2. the face is found, with the eyes above the chin and roughly level
     _, info = render("default", {})
+    print(f"      backend: {info.get('backend')} {info.get('error') or ''}")
     f = info["face"][0] if info.get("faces") else None
     ok = bool(f) and f["eye_l"][0] < f["eye_r"][0] and f["eye_l"][1] < f["chin"][1] and abs(f["roll"]) < 0.2
     check("face tracking", ok, f"{info.get('faces')} face(s), analysis {info.get('face_ms')} ms")
@@ -106,7 +130,7 @@ def main():
     check("background colour", patch[1] > 230 and patch[0] < 25 and patch[2] < 25, f"background patch {patch.round()}")
 
     # 7. looks: the identity LUT changes nothing; mono removes colour
-    lut_dir = PLUGIN / "Contents" / "Resources" / "luts"
+    lut_dir = PLUGIN_DATA / "luts"
     shutil.copy(ROOT / "tests" / "identity_lut.png", lut_dir / "test-identity.png")
     try:
         ident, _ = render("look_identity", {**OFF, "look": "test-identity", "look_strength": 100}, frames=5)

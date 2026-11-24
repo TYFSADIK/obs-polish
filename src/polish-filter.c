@@ -6,7 +6,6 @@
  * person mask); the passes use its latest result, so analysis never blocks rendering.
  * Original work; MIT licence. */
 #include <obs-module.h>
-#include <graphics/image-file.h>
 #include <graphics/matrix4.h>
 #include <util/dstr.h>
 #include <util/platform.h>
@@ -14,6 +13,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include "analyzer.h"
+#include "image-load.h"
 
 #define ANALYSIS_W 384
 
@@ -64,7 +64,7 @@ struct polish {
 	float sticker_size;
 	bool compare;
 
-	gs_image_file_ex_t lut_img, bg_img, sticker_img;
+	struct polish_image lut_img, bg_img, sticker_img;
 	bool lut_loaded, bg_loaded, sticker_loaded;
 	char loaded_look[32], loaded_sticker[32];
 	char *loaded_bg;
@@ -224,28 +224,22 @@ static obs_properties_t *pf_properties(void *data)
 	obs_properties_add_int_slider(g, "sticker_size", obs_module_text("StickerSize"), 50, 200, 1);
 	obs_properties_add_group(pr, "g_sticker", obs_module_text("Stickers"), OBS_GROUP_NORMAL, g);
 
+	const char *err = data ? pa_error(((struct polish *)data)->analyzer) : NULL;
+	if (err) {
+		obs_property_t *warn = obs_properties_add_text(pr, "analysis_error", err, OBS_TEXT_INFO);
+		obs_property_text_set_info_type(warn, OBS_TEXT_INFO_ERROR);
+	}
 	obs_properties_add_button2(pr, "reset", obs_module_text("Reset"), reset_clicked, data);
 	return pr;
 }
 
 /* ------------------------------------------------------------------ resources */
 
-static void load_image(gs_image_file_ex_t *img, bool *loaded, const char *path)
+static void load_image(struct polish_image *img, bool *loaded, const char *path)
 {
-	obs_enter_graphics();
-	gs_image_file_ex_free(img);
-	obs_leave_graphics();
-	*loaded = false;
-	if (!path || !*path)
-		return;
-	gs_image_file_ex_init(img, path, GS_IMAGE_ALPHA_PREMULTIPLY);
-	obs_enter_graphics();
-	gs_image_file_ex_init_texture(img);
-	obs_leave_graphics();
-	*loaded = img->texture != NULL;
-	blog(LOG_DEBUG, "[obs-polish] loaded %s: %s (%ux%u)", path, *loaded ? "ok" : "FAILED", img->cx, img->cy);
-	if (!*loaded)
-		blog(LOG_WARNING, "[obs-polish] could not load %s", path);
+	*loaded = polish_image_load(img, path);
+	if (*loaded)
+		blog(LOG_DEBUG, "[obs-polish] loaded %s (%ux%u)", path, img->cx, img->cy);
 }
 
 static char *module_asset(const char *dir, const char *name, const char *ext)
@@ -334,10 +328,10 @@ static void pf_destroy(void *data)
 	gs_stagesurface_destroy(p->stage);
 	gs_texture_destroy(p->mask_tex);
 	gs_texture_destroy(p->mouth_tex);
-	gs_image_file_ex_free(&p->lut_img);
-	gs_image_file_ex_free(&p->bg_img);
-	gs_image_file_ex_free(&p->sticker_img);
 	obs_leave_graphics();
+	polish_image_free(&p->lut_img);
+	polish_image_free(&p->bg_img);
+	polish_image_free(&p->sticker_img);
 	bfree(p->mask);
 	bfree(p->mouth);
 	bfree(p->bg_path);
@@ -711,8 +705,9 @@ static void analysis_json(void *data, calldata_t *cd)
 	struct polish *p = data;
 	struct pa_result r = p->res;
 	struct dstr s = {0};
-	dstr_printf(&s, "{\"seq\":%llu,\"faces\":%d,\"face_ms\":%.1f,\"mask_ms\":%.1f,\"mask\":[%d,%d],\"mouth\":[%d,%d],\"face\":[",
-		    (unsigned long long)r.seq, r.nfaces, r.face_ms, r.mask_ms, r.mask_w, r.mask_h, r.mouth_w, r.mouth_h);
+	const char *err = pa_error(p->analyzer);
+	dstr_printf(&s, "{\"backend\":\"%s\",\"error\":\"%s\",\"seq\":%llu,\"faces\":%d,\"face_ms\":%.1f,\"mask_ms\":%.1f,\"mask\":[%d,%d],\"mouth\":[%d,%d],\"face\":[",
+		    pa_backend_name(), err ? err : "", (unsigned long long)r.seq, r.nfaces, r.face_ms, r.mask_ms, r.mask_w, r.mask_h, r.mouth_w, r.mouth_h);
 	for (int i = 0; i < r.nfaces; i++) {
 		const struct pa_face *f = &r.faces[i];
 		dstr_catf(&s,

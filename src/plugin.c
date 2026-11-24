@@ -1,7 +1,11 @@
 /* Polish for OBS: beauty, face shape, colour looks, background and stickers.
  * Original open-source work; MIT licence. */
 #include <obs-module.h>
+#ifdef _WIN32
+#include <windows.h>
+#else
 #include <dlfcn.h>
+#endif
 #include <string.h>
 
 OBS_DECLARE_MODULE()
@@ -111,12 +115,24 @@ bool obs_module_load(void)
 	return true;
 }
 
+/* The frontend API lives in the OBS executable's frontend library; look it up at run time so the
+ * plugin also loads where there is no OBS window (the headless tests, obs-websocket hosts). */
+static void *frontend_sym(const char *name)
+{
+#ifdef _WIN32
+	HMODULE m = GetModuleHandleA("obs-frontend-api.dll");
+	return m ? (void *)GetProcAddress(m, name) : NULL;
+#else
+	return dlsym(RTLD_DEFAULT, name);
+#endif
+}
+
 void obs_module_post_load(void)
 {
-	fe_add_tools_item = dlsym(RTLD_DEFAULT, "obs_frontend_add_tools_menu_item");
-	fe_current_scene = dlsym(RTLD_DEFAULT, "obs_frontend_get_current_scene");
-	fe_open_filters = dlsym(RTLD_DEFAULT, "obs_frontend_open_source_filters");
-	fe_add_save_cb = dlsym(RTLD_DEFAULT, "obs_frontend_add_save_callback");
+	fe_add_tools_item = frontend_sym("obs_frontend_add_tools_menu_item");
+	fe_current_scene = frontend_sym("obs_frontend_get_current_scene");
+	fe_open_filters = frontend_sym("obs_frontend_open_source_filters");
+	fe_add_save_cb = frontend_sym("obs_frontend_add_save_callback");
 	if (fe_add_save_cb)
 		fe_add_save_cb(save_cb, NULL);
 	if (fe_add_tools_item)

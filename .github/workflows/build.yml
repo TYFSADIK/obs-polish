@@ -159,6 +159,17 @@ jobs:
           export POLISH_IMAGE_SOURCE_BIN="$OBS/core/image-source/image-source.dll"
           export POLISH_IMAGE_SOURCE_DATA="$OBS/core/image-source/data"
           POLISH_RENDER_TEST=build/Release/render-test.exe python tests/run_tests.py --install stage
+      - name: OBS log for one render (diagnostics)
+        if: always()
+        run: |
+          OBS="$PWD/deps/obs-win-${{ matrix.arch }}"
+          export PATH="$OBS/bin/64bit:$PATH"
+          build/Release/render-test.exe stage/obs-polish/bin/64bit/obs-polish.dll stage/obs-polish/data tests/images/face.png diag.png '{"smooth":0,"brighten":0,"sharpen":0,"bg_mode":3,"bg_color":4278255360}' 20 --json 2>&1 | grep -iE 'error|warn|fail|d3d|shader|polish|effect' | grep -viE 'hotkey' | head -60 || true
+        env:
+          POLISH_GRAPHICS: ${{ github.workspace }}/deps/obs-win-${{ matrix.arch }}/bin/64bit/libobs-d3d11.dll
+          POLISH_OBS_DATA: ${{ github.workspace }}/deps/obs-win-${{ matrix.arch }}/data/libobs/
+          POLISH_IMAGE_SOURCE_BIN: ${{ github.workspace }}/deps/obs-win-${{ matrix.arch }}/core/image-source/image-source.dll
+          POLISH_IMAGE_SOURCE_DATA: ${{ github.workspace }}/deps/obs-win-${{ matrix.arch }}/core/image-source/data
       - uses: actions/upload-artifact@v4
         if: always()
         with: { name: "renders-windows-${{ matrix.arch }}", path: tests/out, if-no-files-found: ignore }

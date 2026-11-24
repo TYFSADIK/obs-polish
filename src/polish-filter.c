@@ -284,6 +284,29 @@ static void reload_resources(struct polish *p)
 
 static const char *pf_name(void *u) { return obs_module_text("Polish"); }
 
+/* Direct3D 11 in OBS refuses to draw when a shader uses a value that was never set (OpenGL does
+ * not mind), and not every pass sets every value in every mode. Give them all zero to start. */
+static void init_params(gs_effect_t *fx)
+{
+	size_t n = gs_effect_get_num_params(fx);
+	for (size_t i = 0; i < n; i++) {
+		gs_eparam_t *prm = gs_effect_get_param_by_idx(fx, i);
+		struct gs_effect_param_info info;
+		gs_effect_get_param_info(prm, &info);
+		const float zero[16] = {0};
+		switch (info.type) {
+		case GS_SHADER_PARAM_FLOAT: gs_effect_set_float(prm, 0.0f); break;
+		case GS_SHADER_PARAM_INT: gs_effect_set_int(prm, 0); break;
+		case GS_SHADER_PARAM_BOOL: gs_effect_set_bool(prm, false); break;
+		case GS_SHADER_PARAM_VEC2: gs_effect_set_val(prm, zero, sizeof(float) * 2); break;
+		case GS_SHADER_PARAM_VEC3: gs_effect_set_val(prm, zero, sizeof(float) * 3); break;
+		case GS_SHADER_PARAM_VEC4: gs_effect_set_val(prm, zero, sizeof(float) * 4); break;
+		case GS_SHADER_PARAM_MATRIX4X4: gs_effect_set_val(prm, zero, sizeof(float) * 16); break;
+		default: break; /* textures: an unbound texture reads as black, which D3D accepts */
+		}
+	}
+}
+
 static void analysis_json(void *data, calldata_t *cd);
 
 static void *pf_create(obs_data_t *s, obs_source_t *src)
@@ -294,6 +317,8 @@ static void *pf_create(obs_data_t *s, obs_source_t *src)
 	char *err = NULL;
 	obs_enter_graphics();
 	p->fx = gs_effect_create_from_file(fx, &err);
+	if (p->fx)
+		init_params(p->fx);
 	p->t_src = gs_texrender_create(GS_RGBA, GS_ZS_NONE);
 	p->t_a = gs_texrender_create(GS_RGBA, GS_ZS_NONE);
 	p->t_b = gs_texrender_create(GS_RGBA, GS_ZS_NONE);

@@ -45,6 +45,7 @@ PLUGIN_BIN, PLUGIN_DATA = plugin_paths()
 TOOL = Path(os.environ.get("POLISH_RENDER_TEST", ROOT / "build" / ("Release/render-test.exe" if SYSTEM == "Windows" else "render-test")))
 
 results = []
+NOISE = 0
 
 
 def render(name, settings, frames=25, image=FACE):
@@ -73,13 +74,19 @@ def main():
     # The baseline is what OBS shows with no filter at all. Comparing against it, not the image
     # file, separates the filter's effect from how a GPU or driver draws the image.
     src, _ = render("baseline", None, frames=5)
+    again, _ = render("baseline2", None, frames=5)
     raw = np.asarray(Image.open(FACE).convert("RGB")).astype(np.int32)
-    print(f"      this GPU draws the image within {np.abs(src - raw).max()} levels of the file")
+    # Real GPUs render the same frame identically every time. Some virtual ones (CI's macOS VMs)
+    # do not; "exact" checks then allow exactly the GPU's own run-to-run difference, no more.
+    global NOISE
+    NOISE = int(np.abs(again - src).max())
+    print(f"      this GPU draws the image within {np.abs(src - raw).max()} levels of the file; "
+          f"two identical renders differ by {NOISE}")
     h, w = src.shape[:2]
 
     # 1. with every effect off, the filter must not change a single pixel
     off, _ = render("off", OFF, frames=5)
-    check("passthrough", np.abs(off - src).max() == 0, f"max difference {np.abs(off - src).max()}")
+    check("passthrough", np.abs(off - src).max() <= NOISE, f"max difference {np.abs(off - src).max()}")
 
     # 2. the face is found, with the eyes above the chin and roughly level
     _, info = render("default", {})
@@ -144,7 +151,7 @@ def main():
         ident, _ = render("look_identity", {**OFF, "look": "test-identity", "look_strength": 100}, frames=5)
     finally:
         os.remove(lut_dir / "test-identity.png")
-    check("identity look", np.abs(ident - src).max() <= 2, f"max difference {np.abs(ident - src).max()}")
+    check("identity look", np.abs(ident - src).max() <= 2 + NOISE, f"max difference {np.abs(ident - src).max()}")
     mono, _ = render("look_mono", {**OFF, "look": "mono", "look_strength": 100}, frames=5)
     chroma = np.abs(mono[..., 0] - mono[..., 2]).mean()
     check("mono look", chroma < 3, f"mean red-blue difference {chroma:.2f}")
@@ -181,7 +188,7 @@ def main():
 
     # 12. compare shows the original
     cmp_, _ = render("compare", {"compare": True, "smooth": 100, "look": "mono", "lipstick": 100, "vignette": 100}, frames=5)
-    check("compare", np.abs(cmp_ - src).max() == 0, f"max difference {np.abs(cmp_ - src).max()}")
+    check("compare", np.abs(cmp_ - src).max() <= NOISE, f"max difference {np.abs(cmp_ - src).max()}")
 
     failed = [n for n, ok, _ in results if not ok]
     print(f"\n{len(results) - len(failed)} of {len(results)} passed")

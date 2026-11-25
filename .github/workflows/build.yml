@@ -39,6 +39,9 @@ jobs:
           cmake -S . -B build-test -DCMAKE_BUILD_TYPE=Release -DCMAKE_OSX_ARCHITECTURES=arm64 -DPOLISH_TESTS=ON
           cmake --build build-test -j --target render-test
           POLISH_RENDER_TEST=build-test/render-test python tests/run_tests.py
+      - name: Test (Metal renderer)
+        run: |
+          POLISH_GRAPHICS=/Applications/OBS.app/Contents/Frameworks/libobs-metal.dylib POLISH_RENDER_TEST=build-test/render-test python tests/run_tests.py
       - name: Test (ONNX backend, as on Windows and Linux)
         run: |
           ORT=$(python scripts/fetch-onnxruntime.py osx-arm64)
@@ -164,7 +167,7 @@ jobs:
         run: |
           OBS="$PWD/deps/obs-win-${{ matrix.arch }}"
           export PATH="$OBS/bin/64bit:$PATH"
-          build/Release/render-test.exe stage/obs-polish/bin/64bit/obs-polish.dll stage/obs-polish/data tests/images/face.png diag.png '{"smooth":0,"brighten":0,"sharpen":0,"bg_mode":3,"bg_color":4278255360}' 20 --json 2>&1 | grep -iE 'error|warn|fail|d3d|shader|polish|effect' | grep -viE 'hotkey' | head -60 || true
+          build/Release/render-test.exe stage/obs-polish/bin/64bit/obs-polish.dll stage/obs-polish/data tests/images/face.png diag.png '{"smooth":0,"brighten":0,"sharpen":0,"bg_mode":1,"bg_blur":80}' 20 --json 2>&1 | grep -iE 'error|warn|fail|d3d|device|shader|polish|effect|exception|not set' | grep -viE 'hotkey' | head -80 || true
         env:
           POLISH_GRAPHICS: ${{ github.workspace }}/deps/obs-win-${{ matrix.arch }}/bin/64bit/libobs-d3d11.dll
           POLISH_OBS_DATA: ${{ github.workspace }}/deps/obs-win-${{ matrix.arch }}/data/libobs/

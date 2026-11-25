@@ -494,6 +494,17 @@ static void pf_render(void *data, gs_effect_t *unused)
 	if (p->reload)
 		reload_resources(p);
 
+	/* Nothing to do (every effect off, or compare held): step aside, so the picture is exactly
+	 * what OBS would show without the filter, at no cost. */
+	bool any = p->smooth > 0 || p->brighten > 0 || p->sharpen > 0 || p->slim > 0 || p->eyes > 0 ||
+		   p->lipstick > 0 || p->blush > 0 || p->teeth > 0 || p->eye_bright > 0 || p->bg_mode != BG_OFF ||
+		   (p->lut_loaded && p->look_amt > 0) || p->exposure != 0 || p->warmth != 0 || p->saturation != 0 ||
+		   p->vignette > 0 || p->grain > 0 || strcmp(p->sticker, "none") != 0;
+	if (!any || p->compare || polish_compare_held) {
+		obs_source_skip_video_filter(p->self);
+		return;
+	}
+
 	/* 1. capture the source */
 	if (!obs_source_process_filter_begin(p->self, GS_RGBA, OBS_ALLOW_DIRECT_RENDERING))
 		return;
@@ -657,8 +668,8 @@ static void pf_render(void *data, gs_effect_t *unused)
 		set_f(fx, "grain", p->grain);
 		set_f(fx, "grain_seed", (float)(p->frame % 997));
 		set_f(fx, "lut_amt", look ? p->look_amt : 0.0f);
-		if (look)
-			gs_effect_set_texture(gs_effect_get_param_by_name(fx, "lut_tex"), p->lut_img.texture);
+		/* always bind something: Metal stops on an unbound texture (lut_amt is 0 without a look) */
+		gs_effect_set_texture(gs_effect_get_param_by_name(fx, "lut_tex"), look ? p->lut_img.texture : cur);
 		set_f(fx, "exposure", p->exposure);
 		set_f(fx, "warmth", p->warmth);
 		set_f(fx, "saturation", p->saturation);

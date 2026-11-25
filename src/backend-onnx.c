@@ -483,6 +483,12 @@ static const int EYE_A[] = {33, 7, 163, 144, 145, 153, 154, 155, 133, 173, 157, 
 static const int EYE_B[] = {263, 249, 390, 373, 374, 380, 381, 382, 362, 398, 384, 385, 386, 387, 388, 466};
 static const int LIPS_OUT[PA_LIP_PTS] = {61, 146, 91, 181, 84, 17, 314, 405, 321, 375, 291, 409, 270, 269, 267, 0, 37, 39, 40, 185};
 static const int LIPS_IN[PA_LIP_PTS] = {78, 95, 88, 178, 87, 14, 317, 402, 318, 324, 308, 415, 310, 311, 312, 13, 82, 81, 80, 191};
+/* eyebrow outlines: upper edge outer to inner, then lower edge inner to outer */
+static const int BROW_A[] = {70, 63, 105, 66, 107, 55, 65, 52, 53, 46};
+static const int BROW_B[] = {300, 293, 334, 296, 336, 285, 295, 282, 283, 276};
+/* around the nostrils and wings; the wings are the extremes across the face */
+static const int NOSE_SIDE[] = {48, 64, 98, 102, 129, 278, 294, 327, 331, 358};
+#define NOSE_BRIDGE 168
 #define NOSE_TIP 1
 #define COUNT(a) ((int)(sizeof(a) / sizeof((a)[0])))
 
@@ -603,7 +609,40 @@ static void to_face(const float *lx, const float *ly, int w, int h, struct pa_fa
 		f->lip_inner[i] = (pa_pt){lx[LIPS_IN[i]] / fw, ly[LIPS_IN[i]] / fh};
 	}
 	f->nlip_outer = f->nlip_inner = PA_LIP_PTS;
+	/* eye outlines (EYE_A and EYE_B go once around each eye), stored by position in the image */
+	for (int e = 0; e < 2; e++) {
+		const int *set = sets[swap ? 1 - e : e];
+		for (int i = 0; i < PA_EYE_PTS && i < COUNT(EYE_A); i++)
+			f->eye_poly[e][i] = (pa_pt){lx[set[i]] / fw, ly[set[i]] / fh};
+	}
+	f->neye = PA_EYE_PTS;
+	int lo = NOSE_SIDE[0], hi = NOSE_SIDE[0];
+	for (int i = 1; i < COUNT(NOSE_SIDE); i++) {
+		if (lx[NOSE_SIDE[i]] < lx[lo])
+			lo = NOSE_SIDE[i];
+		if (lx[NOSE_SIDE[i]] > lx[hi])
+			hi = NOSE_SIDE[i];
+	}
+	f->nose_l = (pa_pt){lx[lo] / fw, ly[lo] / fh};
+	f->nose_r = (pa_pt){lx[hi] / fw, ly[hi] / fh};
+	f->nose_top = (pa_pt){lx[NOSE_BRIDGE] / fw, ly[NOSE_BRIDGE] / fh};
 	pa_finish_face(f, fw / fh);
+	/* eyebrows, after finish_face for the roll; centre lines come image-left to image-right,
+	 * and the image-left brow's inner end is its right end */
+	const int *brows[2] = {BROW_A, BROW_B};
+	for (int e = 0; e < 2; e++) {
+		const int *set = brows[swap ? 1 - e : e];
+		pa_pt pts[COUNT(BROW_A)];
+		for (int i = 0; i < COUNT(BROW_A); i++)
+			pts[i] = (pa_pt){lx[set[i]] / fw, ly[set[i]] / fh};
+		pa_brow_from_points(pts, COUNT(BROW_A), f->roll, fw / fh, f->brow_line[e], &f->brow_thick[e]);
+	}
+	for (int i = 0; i < PA_BROW_PTS / 2; i++) {
+		pa_pt t = f->brow_line[0][i];
+		f->brow_line[0][i] = f->brow_line[0][PA_BROW_PTS - 1 - i];
+		f->brow_line[0][PA_BROW_PTS - 1 - i] = t;
+	}
+	f->nbrow = PA_BROW_PTS;
 }
 
 /* ------------------------------------------------------------------ segmentation */

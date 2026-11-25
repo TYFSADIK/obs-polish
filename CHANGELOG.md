@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.4.0
+
+- **Eye makeup:** eyeshadow, eyeliner with a small wing, eyebrows (fill and define) and eye colour,
+  each in any colour. They follow the eye and brow outlines from the face landmarks; eye colour
+  finds the iris from the darkest part of each eye and keeps the pupil and reflections.
+- **Foundation:** evens skin tone and softens redness and blotches while keeping light, shade and
+  texture, towards a shade you choose.
+- **Soft light:** a gentle glow from a blurred copy of the picture, and a soft light on the face.
+- **Face shape:** V-shape jaw, chin length (shorter or longer), slim nose and fuller lips, alongside
+  slim face and bigger eyes.
+- **Fixed:** with smoothing on (the default) or any makeup, moving *Slim face* or *Bigger eyes*
+  could turn the whole picture one colour, and blush, eye brightening, vignette and grain could
+  land in the wrong place. libobs clears effect values after every pass, and the frame size was
+  only set before the first; every pass now sets what it reads. A new test stacks effects the way
+  people use them, so this cannot come back unnoticed.
+- 24 pixel checks in a real OBS on every platform, up from 14: one for each new effect and one
+  for stacked effects.
+
 ## 0.3.0
 
 - **Windows (x64 and ARM64) and Linux (x86_64 and ARM64)**, alongside macOS (Apple silicon and

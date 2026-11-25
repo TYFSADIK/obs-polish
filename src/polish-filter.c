@@ -19,6 +19,7 @@
 
 extern volatile bool polish_compare_held;
 #define MASK_CAP (1024 * 1024)
+#define BLUR_LEVELS 6
 #define MOUTH_CAP (ANALYSIS_W * 1024 * 2)
 
 enum bg_mode { BG_OFF, BG_BLUR, BG_IMAGE, BG_COLOR };
@@ -33,7 +34,8 @@ static const char *STICKERS[] = {"none", "sunglasses", "starglasses", "crown", "
 struct polish {
 	obs_source_t *self;
 	gs_effect_t *fx;
-	gs_texrender_t *t_src, *t_a, *t_b, *t_small, *t_blur1, *t_blur2;
+	gs_texrender_t *t_src, *t_a, *t_b, *t_small;
+	gs_texrender_t *t_down[BLUR_LEVELS], *t_up[BLUR_LEVELS];
 	gs_stagesurf_t *stage;
 	uint32_t stage_w, stage_h;
 	bool stage_ready;
@@ -323,8 +325,10 @@ static void *pf_create(obs_data_t *s, obs_source_t *src)
 	p->t_a = gs_texrender_create(GS_RGBA, GS_ZS_NONE);
 	p->t_b = gs_texrender_create(GS_RGBA, GS_ZS_NONE);
 	p->t_small = gs_texrender_create(GS_BGRA, GS_ZS_NONE);
-	p->t_blur1 = gs_texrender_create(GS_RGBA, GS_ZS_NONE);
-	p->t_blur2 = gs_texrender_create(GS_RGBA, GS_ZS_NONE);
+	for (int i = 0; i < BLUR_LEVELS; i++) {
+		p->t_down[i] = gs_texrender_create(GS_RGBA, GS_ZS_NONE);
+		p->t_up[i] = gs_texrender_create(GS_RGBA, GS_ZS_NONE);
+	}
 	obs_leave_graphics();
 	if (!p->fx)
 		blog(LOG_ERROR, "[obs-polish] effect failed to compile: %s", err ? err : "(no message)");
@@ -348,8 +352,10 @@ static void pf_destroy(void *data)
 	gs_texrender_destroy(p->t_a);
 	gs_texrender_destroy(p->t_b);
 	gs_texrender_destroy(p->t_small);
-	gs_texrender_destroy(p->t_blur1);
-	gs_texrender_destroy(p->t_blur2);
+	for (int i = 0; i < BLUR_LEVELS; i++) {
+		gs_texrender_destroy(p->t_down[i]);
+		gs_texrender_destroy(p->t_up[i]);
+	}
 	gs_stagesurface_destroy(p->stage);
 	gs_texture_destroy(p->mask_tex);
 	gs_texture_destroy(p->mouth_tex);
@@ -366,18 +372,8 @@ static void pf_destroy(void *data)
 
 /* ------------------------------------------------------------------ helpers */
 
-/* Direct3D 11 silently drops a texture from the shader's inputs when it becomes a render target,
- * while OBS remembers it as still bound and skips binding it again. The blur passes take turns
- * reading and writing the same textures, so clear the inputs before every pass. */
-static void unbind_inputs(void)
-{
-	for (int i = 0; i < 8; i++)
-		gs_load_texture(NULL, i);
-}
-
 static void draw_into(gs_texrender_t *tr, uint32_t w, uint32_t h, gs_effect_t *fx, const char *tech, gs_texture_t *in)
 {
-	unbind_inputs();
 	gs_texrender_reset(tr);
 	if (!gs_texrender_begin(tr, w, h))
 		return;
@@ -631,29 +627,24 @@ static void pf_render(void *data, gs_effect_t *unused)
 	if (p->bg_mode != BG_OFF && p->mask_tex) {
 		gs_texture_t *bg = NULL;
 		if (p->bg_mode == BG_BLUR) {
-			uint32_t bw = w / 4 ? w / 4 : 1, bh = h / 4 ? h / 4 : 1;
-			const char *dbg = getenv("POLISH_DEBUG_BLUR"); /* TEMPORARY: Windows diagnosis */
-			int dmode = dbg ? atoi(dbg) : 0;
+			/* Blur by halving the picture several times and growing it back with bilinear
+			 * filtering (a "dual filter" blur). It uses only OBS's standard drawing, which behaves
+			 * the same on Direct3D, OpenGL and Metal. More levels, more blur. */
+			gs_effect_t *def = obs_get_base_effect(OBS_EFFECT_DEFAULT);
+			int levels = 2 + (int)ceilf(p->bg_blur * (BLUR_LEVELS - 2));
+			uint32_t lw[BLUR_LEVELS + 1], lh[BLUR_LEVELS + 1];
+			lw[0] = w;
+			lh[0] = h;
 			gs_texture_t *b = cur;
-			if (dmode == 1) {
-				bw = w;
-				bh = h;
-			} else {
-				draw_into(p->t_blur1, bw, bh, obs_get_base_effect(OBS_EFFECT_DEFAULT), "Draw", cur);
-				b = gs_texrender_get_texture(p->t_blur1);
+			for (int i = 0; i < levels; i++) {
+				lw[i + 1] = lw[i] / 2 ? lw[i] / 2 : 1;
+				lh[i + 1] = lh[i] / 2 ? lh[i] / 2 : 1;
+				draw_into(p->t_down[i], lw[i + 1], lh[i + 1], def, "Draw", b);
+				b = gs_texrender_get_texture(p->t_down[i]);
 			}
-			int iters = dmode == 2 ? 0 : 1 + (int)(p->bg_blur * 3.0f);
-			if (dmode == 3) {
-				iters = 0;
-				b = cur;
-			}
-			float spread = 0.6f + p->bg_blur * 1.6f;
-			for (int i = 0; i < iters; i++) {
-				set_v2(fx, "blur_step", spread / (float)bw, 0.0f);
-				draw_into(p->t_blur2, bw, bh, fx, "Blur", b);
-				set_v2(fx, "blur_step", 0.0f, spread / (float)bh);
-				draw_into(p->t_blur1, bw, bh, fx, "Blur", gs_texrender_get_texture(p->t_blur2));
-				b = gs_texrender_get_texture(p->t_blur1);
+			for (int i = levels - 1; i >= 2; i--) { /* back up to quarter size; the composite stretches it */
+				draw_into(p->t_up[i], lw[i], lh[i], def, "Draw", b);
+				b = gs_texrender_get_texture(p->t_up[i]);
 			}
 			bg = b;
 		} else if (p->bg_mode == BG_IMAGE && p->bg_loaded) {

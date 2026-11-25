@@ -47,9 +47,7 @@ jobs:
       - name: Test (Metal renderer)
         if: always()
         run: |
-          export POLISH_GRAPHICS=/Applications/OBS.app/Contents/Frameworks/libobs-metal.dylib
-          build-test/render-test build/obs-polish.plugin/Contents/MacOS/obs-polish build/obs-polish.plugin/Contents/Resources tests/images/face.png m.png '{}' 20 2>&1 | tail -25 || true
-          POLISH_RENDER_TEST=build-test/render-test python tests/run_tests.py
+          POLISH_GRAPHICS=/Applications/OBS.app/Contents/Frameworks/libobs-metal.dylib POLISH_RENDER_TEST=build-test/render-test python tests/run_tests.py
       - name: Test (ONNX backend, as on Windows and Linux)
         if: always()
         run: |
@@ -171,21 +169,6 @@ jobs:
           export POLISH_IMAGE_SOURCE_BIN="$OBS/core/image-source/image-source.dll"
           export POLISH_IMAGE_SOURCE_DATA="$OBS/core/image-source/data"
           POLISH_RENDER_TEST=build/Release/render-test.exe python tests/run_tests.py --install stage
-      - name: Blur diagnostics (temporary)
-        if: always()
-        run: |
-          OBS="$PWD/deps/obs-win-${{ matrix.arch }}"
-          export PATH="$OBS/bin/64bit:$PATH"
-          for mode in 0 1 2 3; do
-            POLISH_DEBUG_BLUR=$mode build/Release/render-test.exe stage/obs-polish/bin/64bit/obs-polish.dll stage/obs-polish/data tests/images/face.png diag$mode.png '{"smooth":0,"brighten":0,"sharpen":0,"bg_mode":1,"bg_blur":80}' 20 > log$mode.txt 2>&1 || echo "mode $mode exited $?"
-            python -c "import sys; from PIL import Image; import numpy as np; a=np.asarray(Image.open(sys.argv[1]).convert('RGBA')).astype(int); print('mode', sys.argv[2], 'mean rgba', a.reshape(-1,4).mean(0).round(1), 'flag', a[500,60], 'face', a[300,480])" diag$mode.png $mode
-          done
-          grep -ihE 'error|warn|fail|exception' log0.txt | grep -vi hotkey | head -20 || true
-        env:
-          POLISH_GRAPHICS: ${{ github.workspace }}/deps/obs-win-${{ matrix.arch }}/bin/64bit/libobs-d3d11.dll
-          POLISH_OBS_DATA: ${{ github.workspace }}/deps/obs-win-${{ matrix.arch }}/data/libobs/
-          POLISH_IMAGE_SOURCE_BIN: ${{ github.workspace }}/deps/obs-win-${{ matrix.arch }}/core/image-source/image-source.dll
-          POLISH_IMAGE_SOURCE_DATA: ${{ github.workspace }}/deps/obs-win-${{ matrix.arch }}/core/image-source/data
       - uses: actions/upload-artifact@v4
         if: always()
         with: { name: "renders-windows-${{ matrix.arch }}", path: tests/out, if-no-files-found: ignore }

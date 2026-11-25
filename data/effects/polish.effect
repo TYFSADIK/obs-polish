@@ -38,9 +38,6 @@ uniform float4 bg_uv;         // scale x, y, offset x, y (cover fit)
 uniform float edge_lo;
 uniform float edge_hi;
 
-// blur
-uniform float2 blur_step;
-
 // makeup
 uniform float4 lip_color;     // rgb, strength in a
 uniform float teeth_amt;
@@ -231,16 +228,6 @@ float4 PSWarp(VertData v_in) : TARGET
 	return image.Sample(linear_clamp, pos * texel);
 }
 
-float4 PSBlur(VertData v_in) : TARGET
-{
-	float4 s = image.Sample(linear_clamp, v_in.uv) * 0.2270270;
-	s += image.Sample(linear_clamp, v_in.uv + blur_step * 1.3846154) * 0.3162162;
-	s += image.Sample(linear_clamp, v_in.uv - blur_step * 1.3846154) * 0.3162162;
-	s += image.Sample(linear_clamp, v_in.uv + blur_step * 3.2307692) * 0.0702703;
-	s += image.Sample(linear_clamp, v_in.uv - blur_step * 3.2307692) * 0.0702703;
-	return s;
-}
-
 float4 PSComposite(VertData v_in) : TARGET
 {
 	float4 fg = image.Sample(linear_clamp, v_in.uv);
@@ -301,6 +288,5 @@ float4 PSGrade(VertData v_in) : TARGET
 technique Smooth    { pass { vertex_shader = VSDefault(v_in); pixel_shader = PSSmooth(v_in); } }
 technique Makeup    { pass { vertex_shader = VSDefault(v_in); pixel_shader = PSMakeup(v_in); } }
 technique Warp      { pass { vertex_shader = VSDefault(v_in); pixel_shader = PSWarp(v_in); } }
-technique Blur      { pass { vertex_shader = VSDefault(v_in); pixel_shader = PSBlur(v_in); } }
 technique Composite { pass { vertex_shader = VSDefault(v_in); pixel_shader = PSComposite(v_in); } }
 technique Grade     { pass { vertex_shader = VSDefault(v_in); pixel_shader = PSGrade(v_in); } }

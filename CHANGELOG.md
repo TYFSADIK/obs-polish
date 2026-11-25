@@ -8,6 +8,11 @@
 - **Works in OBS 30, 31, 32 and 33.** 0.1.0 and 0.2.0 were built against OBS 33's libobs, which
   older OBS versions refuse to load, and used an image API that only exists in OBS 33. The plugin
   is now built against libobs 30.0 and decodes images itself.
+- Works with OBS's new Metal renderer on macOS as well as OpenGL.
+- Background blur rebuilt as a dual-filter chain (half-size steps down, bilinear steps up): it
+  renders the same on Direct3D, OpenGL and Metal.
+- With every effect off, or compare held, the filter steps aside: exactly what OBS shows without
+  it, at no cost.
 - Stickers blend with straight alpha, so their edges are no longer darkened.
 - The settings show why face analysis is unavailable instead of silently doing nothing.
 - Fixed a crash when the lips outline had more points than expected.

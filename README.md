@@ -78,7 +78,7 @@ camera ─┬─► smooth + brighten ─► makeup ─► face shape ─► bac
 | | Windows, Linux | macOS |
 | --- | --- | --- |
 | Face analysis | Google's MediaPipe face detection, face mesh and selfie segmentation on [ONNX Runtime](https://onnxruntime.ai), CPU | Apple's Vision framework, built into macOS |
-| Effects | the same GPU shaders in OBS's effect language: Direct3D 11 on Windows, OpenGL on macOS and Linux | |
+| Effects | the same GPU shaders in OBS's effect language: Direct3D 11 on Windows, OpenGL on Linux, OpenGL or Metal on macOS | |
 
 The models' sources and checks are in [data/models/PROVENANCE.md](data/models/PROVENANCE.md):
 the face models were converted from Google's official files and match them to about one part
@@ -94,7 +94,7 @@ platform (no window; [tests/run_tests.py](tests/run_tests.py)):
 | Windows x64 and ARM64 | 33.0.3, official release | Direct3D 11 |
 | Linux x86_64 | newest, OBS Project PPA | OpenGL (Mesa) |
 | Linux ARM64 | **30.0.2**, Ubuntu's own package: the oldest supported | OpenGL (Mesa) |
-| macOS (Apple silicon) | 33.0.3, official release | OpenGL; Vision and ONNX backends both tested |
+| macOS (Apple silicon) | 33.0.3, official release | OpenGL and Metal; Vision and ONNX backends |
 
 The checks include: with every effect off the picture is unchanged to the pixel; the face is
 found; smoothing halves skin detail and leaves the background alone; brightening keeps skin's

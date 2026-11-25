@@ -632,9 +632,21 @@ static void pf_render(void *data, gs_effect_t *unused)
 		gs_texture_t *bg = NULL;
 		if (p->bg_mode == BG_BLUR) {
 			uint32_t bw = w / 4 ? w / 4 : 1, bh = h / 4 ? h / 4 : 1;
-			draw_into(p->t_blur1, bw, bh, obs_get_base_effect(OBS_EFFECT_DEFAULT), "Draw", cur);
-			gs_texture_t *b = gs_texrender_get_texture(p->t_blur1);
-			int iters = 1 + (int)(p->bg_blur * 3.0f);
+			const char *dbg = getenv("POLISH_DEBUG_BLUR"); /* TEMPORARY: Windows diagnosis */
+			int dmode = dbg ? atoi(dbg) : 0;
+			gs_texture_t *b = cur;
+			if (dmode == 1) {
+				bw = w;
+				bh = h;
+			} else {
+				draw_into(p->t_blur1, bw, bh, obs_get_base_effect(OBS_EFFECT_DEFAULT), "Draw", cur);
+				b = gs_texrender_get_texture(p->t_blur1);
+			}
+			int iters = dmode == 2 ? 0 : 1 + (int)(p->bg_blur * 3.0f);
+			if (dmode == 3) {
+				iters = 0;
+				b = cur;
+			}
 			float spread = 0.6f + p->bg_blur * 1.6f;
 			for (int i = 0; i < iters; i++) {
 				set_v2(fx, "blur_step", spread / (float)bw, 0.0f);

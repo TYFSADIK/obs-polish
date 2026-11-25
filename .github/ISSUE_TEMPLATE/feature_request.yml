@@ -1,0 +1,8 @@
+name: Feature request
+description: An effect or improvement you would like
+labels: [enhancement]
+body:
+  - type: textarea
+    id: what
+    attributes: { label: "What would you like, and what would you use it for?" }
+    validations: { required: true }

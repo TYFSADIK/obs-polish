@@ -1,4 +1,6 @@
 build/
+build-*/
+stage/
 dist/
 deps/
 tests/out/

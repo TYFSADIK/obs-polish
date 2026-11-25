@@ -1,0 +1,25 @@
+name: Bug report
+description: Something does not work or looks wrong
+labels: [bug]
+body:
+  - type: input
+    id: os
+    attributes: { label: "Operating system", placeholder: "Windows 11 x64, macOS 15 on M2, Ubuntu 24.04..." }
+    validations: { required: true }
+  - type: input
+    id: obs
+    attributes: { label: "OBS version", placeholder: "33.0.3" }
+    validations: { required: true }
+  - type: input
+    id: polish
+    attributes: { label: "Polish version", placeholder: "0.3.0" }
+    validations: { required: true }
+  - type: textarea
+    id: what
+    attributes: { label: "What happened, and what you expected" }
+    validations: { required: true }
+  - type: input
+    id: log
+    attributes:
+      label: "OBS log"
+      description: "Help > Log Files > Upload Current Log File, then paste the link"

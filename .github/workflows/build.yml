@@ -2,24 +2,191 @@ name: build
 on:
   push:
     branches: [main]
+    tags: ["v*"]
   pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write # attach packages to releases on tags
+
+env:
+  OBS_VERSION: 33.0.3
+
 jobs:
+  # ------------------------------------------------------------------ macOS
   macos:
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Build (universal)
-        run: ./scripts/build.sh
-      - name: Check the bundle
+      - name: Headers
+        run: ./scripts/fetch-deps.sh
+      - name: Build (universal, Vision backend)
         run: |
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+          cmake --build build -j
           lipo -info build/obs-polish.plugin/Contents/MacOS/obs-polish
-          test -f build/obs-polish.plugin/Contents/Resources/effects/polish.effect
-          ls build/obs-polish.plugin/Contents/Resources/luts build/obs-polish.plugin/Contents/Resources/stickers
-      - name: Exported module entry points
-        run: nm -gU build/obs-polish.plugin/Contents/MacOS/obs-polish | grep -E 'obs_module_load|obs_module_set_pointer|obs_module_ver'
-      - name: Package
-        run: ./scripts/package.sh
+      - name: Install OBS for the tests
+        run: |
+          curl -sL -o obs.dmg "https://github.com/obsproject/obs-studio/releases/download/$OBS_VERSION/OBS-Studio-$OBS_VERSION-macOS-Apple.dmg"
+          hdiutil attach -nobrowse -quiet -mountpoint /Volumes/OBS obs.dmg
+          cp -R /Volumes/OBS/OBS.app /Applications/
+          hdiutil detach /Volumes/OBS -quiet
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - run: pip install numpy pillow
+      - name: Build the test tool
+        run: |
+          cmake -S . -B build-test -DCMAKE_BUILD_TYPE=Release -DCMAKE_OSX_ARCHITECTURES=arm64 -DPOLISH_TESTS=ON
+          cmake --build build-test -j --target render-test
+      - name: Test (Vision backend, OpenGL)
+        if: always()
+        # The VM's OpenGL is translated to Metal and rounds a lookup-table pass by up to 6 levels;
+        # real Macs are exact (and so is Metal, below)
+        env: { POLISH_LUT_TOLERANCE: "8" }
+        run: POLISH_RENDER_TEST=build-test/render-test python tests/run_tests.py
+      - name: Test (Metal renderer)
+        if: always()
+        run: |
+          POLISH_GRAPHICS=/Applications/OBS.app/Contents/Frameworks/libobs-metal.dylib POLISH_RENDER_TEST=build-test/render-test python tests/run_tests.py
+      - name: Test (ONNX backend, as on Windows and Linux)
+        if: always()
+        run: |
+          ORT=$(python scripts/fetch-onnxruntime.py osx-arm64)
+          cmake -S . -B build-onnx -DCMAKE_BUILD_TYPE=Release -DCMAKE_OSX_ARCHITECTURES=arm64 -DPOLISH_BACKEND=onnx -DORT_LIB="$ORT"
+          cmake --build build-onnx -j
+          POLISH_LUT_TOLERANCE=8 POLISH_BUILD=build-onnx POLISH_RENDER_TEST=build-test/render-test python tests/run_tests.py
       - uses: actions/upload-artifact@v4
-        with:
-          name: obs-polish-macos
-          path: dist/*.zip
+        if: always()
+        with: { name: renders-macos, path: tests/out, if-no-files-found: ignore }
+      - name: Package
+        run: ./scripts/package.sh macos build
+      - uses: actions/upload-artifact@v4
+        with: { name: pkg-macos, path: dist/* }
+
+  # ------------------------------------------------------------------ Linux build (old glibc: runs on newer distros and in Flatpak)
+  linux-build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { runner: ubuntu-22.04, arch: x86_64, rid: linux-x64 }
+          - { runner: ubuntu-22.04-arm, arch: aarch64, rid: linux-arm64 }
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build
+        run: |
+          ./scripts/fetch-deps.sh
+          ORT=$(python3 scripts/fetch-onnxruntime.py ${{ matrix.rid }})
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DORT_LIB="$ORT"
+          cmake --build build -j
+          cmake --install build --prefix stage
+          echo "newest glibc symbol needed:"
+          objdump -T stage/obs-polish/bin/64bit/obs-polish.so | grep -o 'GLIBC_[0-9.]*' | sort -Vu | tail -1
+      - name: Package
+        run: ./scripts/package.sh linux stage ${{ matrix.arch }}
+      - uses: actions/upload-artifact@v4
+        with: { name: "pkg-linux-${{ matrix.arch }}", path: dist/* }
+      - uses: actions/upload-artifact@v4
+        with: { name: "stage-linux-${{ matrix.arch }}", path: stage }
+
+  # ------------------------------------------------------------------ Linux tests in a real OBS under Xvfb
+  linux-test:
+    needs: linux-build
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # newest OBS from the OBS Project's PPA
+          - { runner: ubuntu-24.04, arch: x86_64, obs: ppa }
+          # Ubuntu's own OBS 30: proves the plugin loads in the oldest supported version
+          - { runner: ubuntu-24.04-arm, arch: aarch64, obs: distro }
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with: { name: "stage-linux-${{ matrix.arch }}", path: stage }
+      - name: Install OBS, Xvfb and Mesa
+        run: |
+          if [ "${{ matrix.obs }}" = ppa ]; then sudo add-apt-repository -y ppa:obsproject/obs-studio; fi
+          sudo apt-get update -q
+          sudo apt-get install -y -q obs-studio xvfb libgl1-mesa-dri libegl1 python3-numpy python3-pil
+          dpkg -s obs-studio | grep -i '^version'
+      - name: Build the test tool against the installed libobs
+        run: |
+          ./scripts/fetch-deps.sh
+          cmake -S . -B build-test -DCMAKE_BUILD_TYPE=Release -DPOLISH_TESTS=ON
+          cmake --build build-test -j --target render-test
+      - name: Test
+        run: |
+          export POLISH_GRAPHICS=$(find /usr/lib -name 'libobs-opengl.so*' | head -1)
+          export POLISH_IMAGE_SOURCE_BIN=$(find /usr/lib -name 'image-source.so' | head -1)
+          export POLISH_IMAGE_SOURCE_DATA=$(find /usr/share/obs -type d -name image-source | head -1)
+          export POLISH_OBS_DATA=/usr/share/obs/libobs/
+          export LIBGL_ALWAYS_SOFTWARE=1
+          echo "graphics $POLISH_GRAPHICS; image source $POLISH_IMAGE_SOURCE_BIN $POLISH_IMAGE_SOURCE_DATA"
+          POLISH_RENDER_TEST=build-test/render-test xvfb-run -a -s "-screen 0 1280x1024x24" python3 tests/run_tests.py --install stage
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with: { name: "renders-linux-${{ matrix.arch }}-${{ matrix.obs }}", path: tests/out, if-no-files-found: ignore }
+
+  # ------------------------------------------------------------------ Windows
+  windows:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { runner: windows-latest, arch: x64, cmake_arch: x64, rid: win-x64 }
+          - { runner: windows-11-arm, arch: arm64, cmake_arch: ARM64, rid: win-arm64 }
+    runs-on: ${{ matrix.runner }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ilammy/msvc-dev-cmd@v1
+        with: { arch: "${{ matrix.arch }}" }
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12", architecture: "${{ matrix.arch }}" }
+      - run: pip install numpy pillow
+      - name: Headers, import libraries, ONNX Runtime
+        run: |
+          ./scripts/fetch-deps.sh
+          pwsh -NoProfile -File scripts/make-import-libs.ps1 -Arch ${{ matrix.arch }} -ObsVersion $OBS_VERSION
+          echo "ORT=$(python scripts/fetch-onnxruntime.py ${{ matrix.rid }})" >> $GITHUB_ENV
+      - name: Build
+        run: |
+          cmake -S . -B build -A ${{ matrix.cmake_arch }} -DORT_LIB="$ORT" -DPOLISH_TESTS=ON
+          cmake --build build --config Release
+          cmake --install build --config Release --prefix stage
+          find stage -maxdepth 4 | head -20
+      - name: Test in the official OBS build (Direct3D 11)
+        run: |
+          OBS="$PWD/deps/obs-win-${{ matrix.arch }}"
+          export PATH="$OBS/bin/64bit:$PATH"
+          export POLISH_OBS_DATA="$OBS/data/libobs/"
+          export POLISH_GRAPHICS="$OBS/bin/64bit/libobs-d3d11.dll"
+          export POLISH_IMAGE_SOURCE_BIN="$OBS/core/image-source/image-source.dll"
+          export POLISH_IMAGE_SOURCE_DATA="$OBS/core/image-source/data"
+          POLISH_RENDER_TEST=build/Release/render-test.exe python tests/run_tests.py --install stage
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with: { name: "renders-windows-${{ matrix.arch }}", path: tests/out, if-no-files-found: ignore }
+      - name: Package
+        run: ./scripts/package.sh windows stage ${{ matrix.arch }}
+      - uses: actions/upload-artifact@v4
+        with: { name: "pkg-windows-${{ matrix.arch }}", path: dist/* }
+
+  # ------------------------------------------------------------------ release
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [macos, linux-test, windows]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with: { pattern: "pkg-*", path: dist, merge-multiple: true }
+      - name: Checksums
+        run: cd dist && sha256sum * > SHA256SUMS.txt && cat SHA256SUMS.txt
+      - name: Attach to the release
+        env: { GH_TOKEN: "${{ github.token }}" }
+        run: gh release upload "${GITHUB_REF_NAME}" dist/* --clobber --repo "${{ github.repository }}"

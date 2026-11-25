@@ -6,7 +6,6 @@
  * person mask); the passes use its latest result, so analysis never blocks rendering.
  * Original work; MIT licence. */
 #include <obs-module.h>
-#include <graphics/image-file.h>
 #include <graphics/matrix4.h>
 #include <util/dstr.h>
 #include <util/platform.h>
@@ -14,11 +13,13 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include "analyzer.h"
+#include "image-load.h"
 
 #define ANALYSIS_W 384
 
 extern volatile bool polish_compare_held;
 #define MASK_CAP (1024 * 1024)
+#define BLUR_LEVELS 6
 #define MOUTH_CAP (ANALYSIS_W * 1024 * 2)
 
 enum bg_mode { BG_OFF, BG_BLUR, BG_IMAGE, BG_COLOR };
@@ -33,7 +34,8 @@ static const char *STICKERS[] = {"none", "sunglasses", "starglasses", "crown", "
 struct polish {
 	obs_source_t *self;
 	gs_effect_t *fx;
-	gs_texrender_t *t_src, *t_a, *t_b, *t_small, *t_blur1, *t_blur2;
+	gs_texrender_t *t_src, *t_a, *t_b, *t_small;
+	gs_texrender_t *t_down[BLUR_LEVELS], *t_up[BLUR_LEVELS];
 	gs_stagesurf_t *stage;
 	uint32_t stage_w, stage_h;
 	bool stage_ready;
@@ -64,7 +66,7 @@ struct polish {
 	float sticker_size;
 	bool compare;
 
-	gs_image_file_ex_t lut_img, bg_img, sticker_img;
+	struct polish_image lut_img, bg_img, sticker_img;
 	bool lut_loaded, bg_loaded, sticker_loaded;
 	char loaded_look[32], loaded_sticker[32];
 	char *loaded_bg;
@@ -224,28 +226,22 @@ static obs_properties_t *pf_properties(void *data)
 	obs_properties_add_int_slider(g, "sticker_size", obs_module_text("StickerSize"), 50, 200, 1);
 	obs_properties_add_group(pr, "g_sticker", obs_module_text("Stickers"), OBS_GROUP_NORMAL, g);
 
+	const char *err = data ? pa_error(((struct polish *)data)->analyzer) : NULL;
+	if (err) {
+		obs_property_t *warn = obs_properties_add_text(pr, "analysis_error", err, OBS_TEXT_INFO);
+		obs_property_text_set_info_type(warn, OBS_TEXT_INFO_ERROR);
+	}
 	obs_properties_add_button2(pr, "reset", obs_module_text("Reset"), reset_clicked, data);
 	return pr;
 }
 
 /* ------------------------------------------------------------------ resources */
 
-static void load_image(gs_image_file_ex_t *img, bool *loaded, const char *path)
+static void load_image(struct polish_image *img, bool *loaded, const char *path)
 {
-	obs_enter_graphics();
-	gs_image_file_ex_free(img);
-	obs_leave_graphics();
-	*loaded = false;
-	if (!path || !*path)
-		return;
-	gs_image_file_ex_init(img, path, GS_IMAGE_ALPHA_PREMULTIPLY);
-	obs_enter_graphics();
-	gs_image_file_ex_init_texture(img);
-	obs_leave_graphics();
-	*loaded = img->texture != NULL;
-	blog(LOG_DEBUG, "[obs-polish] loaded %s: %s (%ux%u)", path, *loaded ? "ok" : "FAILED", img->cx, img->cy);
-	if (!*loaded)
-		blog(LOG_WARNING, "[obs-polish] could not load %s", path);
+	*loaded = polish_image_load(img, path);
+	if (*loaded)
+		blog(LOG_DEBUG, "[obs-polish] loaded %s (%ux%u)", path, img->cx, img->cy);
 }
 
 static char *module_asset(const char *dir, const char *name, const char *ext)
@@ -290,6 +286,29 @@ static void reload_resources(struct polish *p)
 
 static const char *pf_name(void *u) { return obs_module_text("Polish"); }
 
+/* Direct3D 11 in OBS refuses to draw when a shader uses a value that was never set (OpenGL does
+ * not mind), and not every pass sets every value in every mode. Give them all zero to start. */
+static void init_params(gs_effect_t *fx)
+{
+	size_t n = gs_effect_get_num_params(fx);
+	for (size_t i = 0; i < n; i++) {
+		gs_eparam_t *prm = gs_effect_get_param_by_idx(fx, i);
+		struct gs_effect_param_info info;
+		gs_effect_get_param_info(prm, &info);
+		const float zero[16] = {0};
+		switch (info.type) {
+		case GS_SHADER_PARAM_FLOAT: gs_effect_set_float(prm, 0.0f); break;
+		case GS_SHADER_PARAM_INT: gs_effect_set_int(prm, 0); break;
+		case GS_SHADER_PARAM_BOOL: gs_effect_set_bool(prm, false); break;
+		case GS_SHADER_PARAM_VEC2: gs_effect_set_val(prm, zero, sizeof(float) * 2); break;
+		case GS_SHADER_PARAM_VEC3: gs_effect_set_val(prm, zero, sizeof(float) * 3); break;
+		case GS_SHADER_PARAM_VEC4: gs_effect_set_val(prm, zero, sizeof(float) * 4); break;
+		case GS_SHADER_PARAM_MATRIX4X4: gs_effect_set_val(prm, zero, sizeof(float) * 16); break;
+		default: break; /* textures: an unbound texture reads as black, which D3D accepts */
+		}
+	}
+}
+
 static void analysis_json(void *data, calldata_t *cd);
 
 static void *pf_create(obs_data_t *s, obs_source_t *src)
@@ -300,12 +319,16 @@ static void *pf_create(obs_data_t *s, obs_source_t *src)
 	char *err = NULL;
 	obs_enter_graphics();
 	p->fx = gs_effect_create_from_file(fx, &err);
+	if (p->fx)
+		init_params(p->fx);
 	p->t_src = gs_texrender_create(GS_RGBA, GS_ZS_NONE);
 	p->t_a = gs_texrender_create(GS_RGBA, GS_ZS_NONE);
 	p->t_b = gs_texrender_create(GS_RGBA, GS_ZS_NONE);
 	p->t_small = gs_texrender_create(GS_BGRA, GS_ZS_NONE);
-	p->t_blur1 = gs_texrender_create(GS_RGBA, GS_ZS_NONE);
-	p->t_blur2 = gs_texrender_create(GS_RGBA, GS_ZS_NONE);
+	for (int i = 0; i < BLUR_LEVELS; i++) {
+		p->t_down[i] = gs_texrender_create(GS_RGBA, GS_ZS_NONE);
+		p->t_up[i] = gs_texrender_create(GS_RGBA, GS_ZS_NONE);
+	}
 	obs_leave_graphics();
 	if (!p->fx)
 		blog(LOG_ERROR, "[obs-polish] effect failed to compile: %s", err ? err : "(no message)");
@@ -329,15 +352,17 @@ static void pf_destroy(void *data)
 	gs_texrender_destroy(p->t_a);
 	gs_texrender_destroy(p->t_b);
 	gs_texrender_destroy(p->t_small);
-	gs_texrender_destroy(p->t_blur1);
-	gs_texrender_destroy(p->t_blur2);
+	for (int i = 0; i < BLUR_LEVELS; i++) {
+		gs_texrender_destroy(p->t_down[i]);
+		gs_texrender_destroy(p->t_up[i]);
+	}
 	gs_stagesurface_destroy(p->stage);
 	gs_texture_destroy(p->mask_tex);
 	gs_texture_destroy(p->mouth_tex);
-	gs_image_file_ex_free(&p->lut_img);
-	gs_image_file_ex_free(&p->bg_img);
-	gs_image_file_ex_free(&p->sticker_img);
 	obs_leave_graphics();
+	polish_image_free(&p->lut_img);
+	polish_image_free(&p->bg_img);
+	polish_image_free(&p->sticker_img);
 	bfree(p->mask);
 	bfree(p->mouth);
 	bfree(p->bg_path);
@@ -475,6 +500,17 @@ static void pf_render(void *data, gs_effect_t *unused)
 	if (p->reload)
 		reload_resources(p);
 
+	/* Nothing to do (every effect off, or compare held): step aside, so the picture is exactly
+	 * what OBS would show without the filter, at no cost. */
+	bool any = p->smooth > 0 || p->brighten > 0 || p->sharpen > 0 || p->slim > 0 || p->eyes > 0 ||
+		   p->lipstick > 0 || p->blush > 0 || p->teeth > 0 || p->eye_bright > 0 || p->bg_mode != BG_OFF ||
+		   (p->lut_loaded && p->look_amt > 0) || p->exposure != 0 || p->warmth != 0 || p->saturation != 0 ||
+		   p->vignette > 0 || p->grain > 0 || strcmp(p->sticker, "none") != 0;
+	if (!any || p->compare || polish_compare_held) {
+		obs_source_skip_video_filter(p->self);
+		return;
+	}
+
 	/* 1. capture the source */
 	if (!obs_source_process_filter_begin(p->self, GS_RGBA, OBS_ALLOW_DIRECT_RENDERING))
 		return;
@@ -591,17 +627,24 @@ static void pf_render(void *data, gs_effect_t *unused)
 	if (p->bg_mode != BG_OFF && p->mask_tex) {
 		gs_texture_t *bg = NULL;
 		if (p->bg_mode == BG_BLUR) {
-			uint32_t bw = w / 4 ? w / 4 : 1, bh = h / 4 ? h / 4 : 1;
-			draw_into(p->t_blur1, bw, bh, obs_get_base_effect(OBS_EFFECT_DEFAULT), "Draw", cur);
-			gs_texture_t *b = gs_texrender_get_texture(p->t_blur1);
-			int iters = 1 + (int)(p->bg_blur * 3.0f);
-			float spread = 0.6f + p->bg_blur * 1.6f;
-			for (int i = 0; i < iters; i++) {
-				set_v2(fx, "blur_step", spread / (float)bw, 0.0f);
-				draw_into(p->t_blur2, bw, bh, fx, "Blur", b);
-				set_v2(fx, "blur_step", 0.0f, spread / (float)bh);
-				draw_into(p->t_blur1, bw, bh, fx, "Blur", gs_texrender_get_texture(p->t_blur2));
-				b = gs_texrender_get_texture(p->t_blur1);
+			/* Blur by halving the picture several times and growing it back with bilinear
+			 * filtering (a "dual filter" blur). It uses only OBS's standard drawing, which behaves
+			 * the same on Direct3D, OpenGL and Metal. More levels, more blur. */
+			gs_effect_t *def = obs_get_base_effect(OBS_EFFECT_DEFAULT);
+			int levels = 2 + (int)ceilf(p->bg_blur * (BLUR_LEVELS - 2));
+			uint32_t lw[BLUR_LEVELS + 1], lh[BLUR_LEVELS + 1];
+			lw[0] = w;
+			lh[0] = h;
+			gs_texture_t *b = cur;
+			for (int i = 0; i < levels; i++) {
+				lw[i + 1] = lw[i] / 2 ? lw[i] / 2 : 1;
+				lh[i + 1] = lh[i] / 2 ? lh[i] / 2 : 1;
+				draw_into(p->t_down[i], lw[i + 1], lh[i + 1], def, "Draw", b);
+				b = gs_texrender_get_texture(p->t_down[i]);
+			}
+			for (int i = levels - 1; i >= 2; i--) { /* back up to quarter size; the composite stretches it */
+				draw_into(p->t_up[i], lw[i], lh[i], def, "Draw", b);
+				b = gs_texrender_get_texture(p->t_up[i]);
 			}
 			bg = b;
 		} else if (p->bg_mode == BG_IMAGE && p->bg_loaded) {
@@ -638,8 +681,8 @@ static void pf_render(void *data, gs_effect_t *unused)
 		set_f(fx, "grain", p->grain);
 		set_f(fx, "grain_seed", (float)(p->frame % 997));
 		set_f(fx, "lut_amt", look ? p->look_amt : 0.0f);
-		if (look)
-			gs_effect_set_texture(gs_effect_get_param_by_name(fx, "lut_tex"), p->lut_img.texture);
+		/* always bind something: Metal stops on an unbound texture (lut_amt is 0 without a look) */
+		gs_effect_set_texture(gs_effect_get_param_by_name(fx, "lut_tex"), look ? p->lut_img.texture : cur);
 		set_f(fx, "exposure", p->exposure);
 		set_f(fx, "warmth", p->warmth);
 		set_f(fx, "saturation", p->saturation);
@@ -711,8 +754,9 @@ static void analysis_json(void *data, calldata_t *cd)
 	struct polish *p = data;
 	struct pa_result r = p->res;
 	struct dstr s = {0};
-	dstr_printf(&s, "{\"seq\":%llu,\"faces\":%d,\"face_ms\":%.1f,\"mask_ms\":%.1f,\"mask\":[%d,%d],\"mouth\":[%d,%d],\"face\":[",
-		    (unsigned long long)r.seq, r.nfaces, r.face_ms, r.mask_ms, r.mask_w, r.mask_h, r.mouth_w, r.mouth_h);
+	const char *err = pa_error(p->analyzer);
+	dstr_printf(&s, "{\"backend\":\"%s\",\"error\":\"%s\",\"seq\":%llu,\"faces\":%d,\"face_ms\":%.1f,\"mask_ms\":%.1f,\"mask\":[%d,%d],\"mouth\":[%d,%d],\"face\":[",
+		    pa_backend_name(), err ? err : "", (unsigned long long)r.seq, r.nfaces, r.face_ms, r.mask_ms, r.mask_w, r.mask_h, r.mouth_w, r.mouth_h);
 	for (int i = 0; i < r.nfaces; i++) {
 		const struct pa_face *f = &r.faces[i];
 		dstr_catf(&s,

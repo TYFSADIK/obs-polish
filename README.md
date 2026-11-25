@@ -26,11 +26,96 @@ face-tracked stickers. Windows, macOS and Linux. No watermark, no account, nothi
 | **Linux** x86_64 | [obs-polish-linux-x86_64.tar.gz](https://github.com/TYFSADIK/obs-polish/releases/latest/download/obs-polish-linux-x86_64.tar.gz) | extract, run `./install.sh` (also installs into the Flatpak OBS if you have it) |
 | **Linux** ARM64 | [obs-polish-linux-aarch64.tar.gz](https://github.com/TYFSADIK/obs-polish/releases/latest/download/obs-polish-linux-aarch64.tar.gz) | extract, run `./install.sh` |
 
-Works with **OBS 30, 31, 32 and 33**. Restart OBS after installing, then choose
-**Tools > Polish: beauty and effects**: it adds the filter to your camera and opens its settings.
-Or right-click any video source, **Filters**, **+**, **Polish**.
+Works with **OBS 30, 31, 32 and 33**. Step-by-step instructions for each system are below.
 
-Polish also works in Zoom, Teams, Meet and Discord through OBS's **Start Virtual Camera**.
+## Install
+
+Install OBS Studio first ([obsproject.com](https://obsproject.com)), and close it before installing Polish.
+
+### Windows (10 and 11, x64 or ARM)
+
+1. Download the zip for your PC: **x64** for almost all PCs, **ARM64** for Windows on ARM
+   (Snapdragon laptops). Not sure? *Settings > System > About > System type*.
+2. Right-click the zip, **Extract All...**, and open the extracted folder. (The installer cannot
+   run from inside the zip.)
+3. Double-click **Install Polish.cmd**.
+   - If Windows shows *"Windows protected your PC"*: click **More info**, then **Run anyway**.
+     Polish is not code-signed, which costs money every year; the source is all here.
+   - Click **Yes** when Windows asks for administrator rights: OBS reads plugins from
+     `C:\ProgramData\obs-studio\plugins`, which is shared by every user on the PC.
+4. Start OBS.
+
+**Manual install:** copy the `obs-polish` folder from the zip into
+`C:\ProgramData\obs-studio\plugins\` (create the folders if they do not exist).
+
+### macOS (12 Monterey and later, Apple silicon or Intel)
+
+1. Download **obs-polish-macos-universal.zip** and double-click it to unzip.
+2. Double-click **Install Polish.command** in the unzipped folder.
+   - If macOS says it *"cannot be opened"* or *"cannot verify the developer"*: open
+     **System Settings > Privacy & Security**, scroll down, click **Open Anyway** next to the
+     message, then confirm. (On macOS 14 and earlier you can also right-click the file and choose
+     **Open**.) Polish is not notarised by Apple, which needs a paid developer account.
+3. A Terminal window says where it was installed; close it and start OBS.
+
+**Manual install:** copy `obs-polish.plugin` into
+`~/Library/Application Support/obs-studio/plugins/` (in Finder: **Go > Go to Folder...** and
+paste the path; create `plugins` if it does not exist). Then run
+`xattr -dr com.apple.quarantine ~/Library/Application\ Support/obs-studio/plugins/obs-polish.plugin`
+in Terminal so macOS lets OBS load it.
+
+### Linux (x86_64 or ARM64)
+
+```bash
+tar xzf obs-polish-linux-x86_64.tar.gz        # or obs-polish-linux-aarch64.tar.gz
+cd obs-polish-*/
+./install.sh
+```
+
+The script installs for your user into `~/.config/obs-studio/plugins/obs-polish`, which works
+with OBS from your distribution, the OBS Project's PPA, or a build from source. If you use the
+**Flatpak** OBS (`com.obsproject.Studio`), it installs there too
+(`~/.var/app/com.obsproject.Studio/config/obs-studio/plugins/obs-polish`). No `sudo` needed.
+
+The Snap version of OBS has not been tested.
+
+## Use
+
+1. Start OBS and add your camera if you have not: **Sources > + > Video Capture Device**.
+2. Choose **Tools > Polish: beauty and effects**. Polish is added to the selected source (or the
+   first camera in the scene) and its settings open.
+   Or: right-click the source, **Filters**, **+** under *Effect Filters*, **Polish**.
+3. Move the sliders; the preview updates as you go. Tick **Compare with original** to check the
+   difference. Effects you leave at 0 cost nothing.
+4. To hold a key for a quick before/after: **Settings > Hotkeys > Polish: hold to compare with
+   original**.
+
+**In Zoom, Teams, Google Meet, Discord and others:** click **Start Virtual Camera** in OBS's
+Controls, then choose **OBS Virtual Camera** as the camera in the other app.
+
+**Your own background picture:** **Background > Image**, then **Background: My own image**, and
+pick a PNG or JPEG.
+
+## Uninstall
+
+Close OBS and delete the folder:
+
+| | Delete |
+| --- | --- |
+| Windows | `C:\ProgramData\obs-studio\plugins\obs-polish` |
+| macOS | `~/Library/Application Support/obs-studio/plugins/obs-polish.plugin` |
+| Linux | `~/.config/obs-studio/plugins/obs-polish` (and the Flatpak path above, if you used it) |
+
+## Troubleshooting
+
+| Problem | What to do |
+| --- | --- |
+| No **Polish** in Tools or in the filter list | Restart OBS after installing. Check **Help > About** shows OBS 30 or later. Check the folder is in the place listed under *Install*. |
+| Still not there | **Help > Log Files > View Current Log**, search for `obs-polish`. A line `[obs-polish] loaded, version ...` means it loaded; any other line says why not. |
+| A red message in Polish's settings | Face analysis could not start, and the message says why (usually a damaged install: reinstall). Looks, colour and sharpening still work. |
+| Effects that need a face do nothing | They need a face to be found: face the camera with even light. Smoothing, makeup, face shape and stickers follow faces; looks and background do not. |
+| The background edge shimmers | Raise **Edge softness**; a plain, evenly lit background helps most. |
+| Anything else | [Open an issue](https://github.com/TYFSADIK/obs-polish/issues/new/choose) with your OS, OBS version and the log link (**Help > Log Files > Upload Current Log File**). |
 
 ## What it does
 

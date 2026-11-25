@@ -29,6 +29,82 @@ enum bg_mode { BG_OFF, BG_BLUR, BG_IMAGE, BG_COLOR };
 /* grouped in the list by their labels: Portrait, Food, Landscape, Modern, then the basics */
 static const char *LOOKS[] = {"none", "rosy", "fresh", "porcelain", "tasty", "lush", "sunset", "cinematic", "noir", "vintage",
 			      "warm", "cool", "golden", "vivid", "pastel", "tealorange", "mono", "film", NULL};
+/* Effects. id matches style_id in polish.effect; param is the label of the effect's own slider
+ * (NULL: none); c1, c2 label its colours (NULL: none); blur > 0 asks for a blurred copy of the frame,
+ * halved that many times, as blur_tex (-1: as many times as the slider says). */
+struct style {
+	const char *key;
+	int id;
+	const char *param, *c1, *c2;
+	int blur;
+};
+static const struct style STYLES[] = {
+	{"none", 0, NULL, NULL, NULL, 0},
+	/* colour and tone */
+	{"grayscale", 1, NULL, NULL, NULL, 0},
+	{"sepia", 2, NULL, NULL, NULL, 0},
+	{"tealorange", 3, NULL, NULL, NULL, 0},
+	{"invert", 4, NULL, NULL, NULL, 0},
+	{"tint", 5, NULL, "StyleTint", NULL, 0},
+	{"duotone", 6, NULL, "StyleShadows", "StyleHighlights", 0},
+	{"bleach", 7, NULL, NULL, NULL, 0},
+	{"crossprocess", 8, NULL, NULL, NULL, 0},
+	{"golden", 9, NULL, NULL, NULL, 0},
+	{"moonlight", 10, NULL, NULL, NULL, 0},
+	{"neon", 11, NULL, NULL, NULL, 0},
+	{"colorpass", 12, "StyleRange", "StyleKeep", NULL, 0},
+	/* light */
+	{"hdr", 15, "StyleDetail", NULL, NULL, 5},
+	{"bloom", 16, "StyleSpread", NULL, NULL, 4},
+	{"solarize", 17, "StyleLevel", NULL, NULL, 0},
+	{"posterize", 18, "StyleLevels", NULL, NULL, 0},
+	{"threshold", 19, "StyleLevel", NULL, NULL, 0},
+	{"lightleak", 20, "StyleSpeed", NULL, NULL, 0},
+	/* blur and sharpen */
+	{"blur", 21, "StyleSize", NULL, NULL, -1},
+	{"motionblur", 22, "StyleAngle", NULL, NULL, 0},
+	{"zoomblur", 23, "StyleReach", NULL, NULL, 0},
+	{"tiltshift", 24, "StyleFocus", NULL, NULL, 4},
+	{"boxblur", 25, "StyleSize", NULL, NULL, 0},
+	{"lensblur", 26, "StyleSize", NULL, NULL, 0},
+	{"unsharp", 27, "StyleBoost", NULL, NULL, 2},
+	{"denoise", 28, "StyleRadius", NULL, NULL, 0},
+	/* retro, analog and texture */
+	{"filmgrain", 29, "StyleSize", NULL, NULL, 0},
+	{"vhs", 30, "StyleSoftness", NULL, NULL, 0},
+	{"crt", 31, "StyleLineSize", NULL, NULL, 0},
+	{"super8", 32, "StyleGrain", NULL, NULL, 0},
+	{"oldfilm", 33, "StyleDamage", NULL, NULL, 0},
+	{"halftone", 34, "StyleSize", NULL, NULL, 0},
+	{"rgbsplit", 35, "StyleDistance", NULL, NULL, 0},
+	{"dither", 36, "StyleLevels", NULL, NULL, 0},
+	{"lomo", 37, "StyleVignette", NULL, NULL, 0},
+	/* distortion and stylisation */
+	{"glitch", 38, "StyleSplit", NULL, NULL, 0},
+	{"pixelate", 39, "StyleSize", NULL, NULL, 0},
+	{"fisheye", 40, "StyleCurve", NULL, NULL, 0},
+	{"mirror", 41, "StyleSlices", NULL, NULL, 0},
+	{"wave", 42, "StyleWavelength", NULL, NULL, 0},
+	{"twirl", 43, "StyleTurns", NULL, NULL, 0},
+	{"emboss", 44, "StyleDepth", NULL, NULL, 0},
+	{"edges", 45, "StyleLineWidth", "StyleLineColor", NULL, 0},
+	{"cartoon", 46, "StyleOutlines", NULL, NULL, 1},
+	{"oilpaint", 47, "StyleSize", NULL, NULL, 0},
+	{"thermal", 48, "StyleSensitivity", NULL, NULL, 2},
+	{"nightvision", 49, "StyleGain", NULL, NULL, 0},
+	{"echo", 50, "StyleTrail", NULL, NULL, 0},
+};
+#define NSTYLES ((int)(sizeof(STYLES) / sizeof(STYLES[0])))
+#define STYLE_ECHO 50
+
+static const struct style *find_style(const char *key)
+{
+	for (int i = 0; i < NSTYLES; i++)
+		if (!strcmp(STYLES[i].key, key))
+			return &STYLES[i];
+	return &STYLES[0];
+}
+
 static const char *BG_PRESETS[] = {"custom", "studio", "gradient", "bokeh", "sunset", NULL};
 static const char *STICKERS[] = {"none", "sunglasses", "starglasses", "crown", "flowercrown", "catears", "bunnyears",
 				 "devilhorns", "halo", "hearts", "partyhat", NULL};
@@ -38,6 +114,9 @@ struct polish {
 	gs_effect_t *fx;
 	gs_texrender_t *t_src, *t_a, *t_b, *t_small;
 	gs_texrender_t *t_down[BLUR_LEVELS], *t_up[BLUR_LEVELS];
+	gs_texrender_t *t_hist; /* the previous output, for echo */
+	bool hist_valid;
+	uint32_t hist_w, hist_h;
 	gs_stagesurf_t *stage;
 	uint32_t stage_w, stage_h;
 	bool stage_ready;
@@ -62,7 +141,10 @@ struct polish {
 	float lipstick, blush, teeth, eye_bright;
 	float eyeshadow, eyeliner, brows, eye_color;
 	uint32_t lip_color, blush_color, foundation_color, shadow_color, liner_color, brow_color, iris_color;
-	float vignette, grain;
+	float vignette, grain, contrast;
+	const struct style *style;
+	float style_amt, style_k;
+	uint32_t style_c1, style_c2;
 	char bg_preset[32];
 	char look[32];
 	float look_amt, exposure, warmth, saturation;
@@ -115,6 +197,15 @@ static void pf_update(void *data, obs_data_t *s)
 	p->eye_color = pct(s, "eye_color");
 	p->iris_color = (uint32_t)obs_data_get_int(s, "iris_color");
 	p->vignette = pct(s, "vignette");
+	p->contrast = pct(s, "contrast");
+	const struct style *st = find_style(obs_data_get_string(s, "style"));
+	if (st != p->style)
+		p->hist_valid = false; /* a new effect starts without old trails */
+	p->style = st;
+	p->style_amt = pct(s, "style_amount");
+	p->style_k = pct(s, "style_param");
+	p->style_c1 = (uint32_t)obs_data_get_int(s, "style_color");
+	p->style_c2 = (uint32_t)obs_data_get_int(s, "style_color2");
 	p->grain = pct(s, "grain");
 	snprintf(p->bg_preset, sizeof p->bg_preset, "%s", obs_data_get_string(s, "bg_preset"));
 	snprintf(p->look, sizeof p->look, "%s", obs_data_get_string(s, "look"));
@@ -157,6 +248,31 @@ static void pf_defaults(obs_data_t *s)
 	obs_data_set_default_int(s, "bg_color", 0xFF2A2A2A);
 	obs_data_set_default_string(s, "sticker", "none");
 	obs_data_set_default_int(s, "sticker_size", 100);
+	obs_data_set_default_string(s, "style", "none");
+	obs_data_set_default_int(s, "style_amount", 100);
+	obs_data_set_default_int(s, "style_param", 50);
+	obs_data_set_default_int(s, "style_color", 0xFF3C28E6);  /* ABGR: a strong red */
+	obs_data_set_default_int(s, "style_color2", 0xFF78D2FF); /* ABGR: a warm yellow */
+}
+
+/* Show the effect's own controls, labelled for what they do in that effect. */
+static bool style_changed(obs_properties_t *props, obs_property_t *prop, obs_data_t *s)
+{
+	const struct style *st = find_style(obs_data_get_string(s, "style"));
+	bool on = st->id != 0;
+	obs_property_set_visible(obs_properties_get(props, "style_amount"), on);
+	obs_property_t *k = obs_properties_get(props, "style_param");
+	obs_property_set_visible(k, st->param != NULL);
+	if (st->param)
+		obs_property_set_description(k, obs_module_text(st->param));
+	obs_property_t *c1 = obs_properties_get(props, "style_color"), *c2 = obs_properties_get(props, "style_color2");
+	obs_property_set_visible(c1, st->c1 != NULL);
+	obs_property_set_visible(c2, st->c2 != NULL);
+	if (st->c1)
+		obs_property_set_description(c1, obs_module_text(st->c1));
+	if (st->c2)
+		obs_property_set_description(c2, obs_module_text(st->c2));
+	return true;
 }
 
 static bool bg_mode_changed(obs_properties_t *props, obs_property_t *prop, obs_data_t *s)
@@ -238,7 +354,8 @@ static obs_properties_t *pf_properties(void *data)
 	obs_properties_add_int_slider(g, "exposure", obs_module_text("Exposure"), -50, 50, 1);
 	obs_properties_add_int_slider(g, "warmth", obs_module_text("Warmth"), -50, 50, 1);
 	obs_properties_add_int_slider(g, "saturation", obs_module_text("Saturation"), -50, 50, 1);
-	obs_properties_add_int_slider(g, "vignette", obs_module_text("Vignette"), 0, 100, 1);
+	obs_properties_add_int_slider(g, "contrast", obs_module_text("Contrast"), -50, 50, 1);
+	obs_properties_add_int_slider(g, "vignette", obs_module_text("Vignette"), -100, 100, 1);
 	obs_properties_add_int_slider(g, "grain", obs_module_text("Grain"), 0, 100, 1);
 	obs_properties_add_group(pr, "g_color", obs_module_text("Colour"), OBS_GROUP_NORMAL, g);
 
@@ -268,6 +385,21 @@ static obs_properties_t *pf_properties(void *data)
 	add_list(g, "sticker", "Sticker", "Sticker", STICKERS);
 	obs_properties_add_int_slider(g, "sticker_size", obs_module_text("StickerSize"), 50, 200, 1);
 	obs_properties_add_group(pr, "g_sticker", obs_module_text("Stickers"), OBS_GROUP_NORMAL, g);
+
+	g = obs_properties_create();
+	obs_property_t *sl = obs_properties_add_list(g, "style", obs_module_text("Style"), OBS_COMBO_TYPE_LIST, OBS_COMBO_FORMAT_STRING);
+	for (int i = 0; i < NSTYLES; i++) {
+		struct dstr k = {0};
+		dstr_printf(&k, "Style.%s", STYLES[i].key);
+		obs_property_list_add_string(sl, obs_module_text(k.array), STYLES[i].key);
+		dstr_free(&k);
+	}
+	obs_property_set_modified_callback(sl, style_changed);
+	obs_properties_add_int_slider(g, "style_amount", obs_module_text("StyleStrength"), 0, 100, 1);
+	obs_properties_add_int_slider(g, "style_param", obs_module_text("StyleSize"), 0, 100, 1);
+	obs_properties_add_color(g, "style_color", obs_module_text("StyleTint"));
+	obs_properties_add_color(g, "style_color2", obs_module_text("StyleHighlights"));
+	obs_properties_add_group(pr, "g_style", obs_module_text("Effects"), OBS_GROUP_NORMAL, g);
 
 	const char *err = data ? pa_error(((struct polish *)data)->analyzer) : NULL;
 	if (err) {
@@ -368,6 +500,7 @@ static void *pf_create(obs_data_t *s, obs_source_t *src)
 	p->t_a = gs_texrender_create(GS_RGBA, GS_ZS_NONE);
 	p->t_b = gs_texrender_create(GS_RGBA, GS_ZS_NONE);
 	p->t_small = gs_texrender_create(GS_BGRA, GS_ZS_NONE);
+	p->t_hist = gs_texrender_create(GS_RGBA, GS_ZS_NONE);
 	for (int i = 0; i < BLUR_LEVELS; i++) {
 		p->t_down[i] = gs_texrender_create(GS_RGBA, GS_ZS_NONE);
 		p->t_up[i] = gs_texrender_create(GS_RGBA, GS_ZS_NONE);
@@ -396,6 +529,7 @@ static void pf_destroy(void *data)
 	gs_texrender_destroy(p->t_a);
 	gs_texrender_destroy(p->t_b);
 	gs_texrender_destroy(p->t_small);
+	gs_texrender_destroy(p->t_hist);
 	for (int i = 0; i < BLUR_LEVELS; i++) {
 		gs_texrender_destroy(p->t_down[i]);
 		gs_texrender_destroy(p->t_up[i]);
@@ -559,6 +693,75 @@ static void pass_common(gs_effect_t *fx, const struct pass_common *c)
 	set_f(fx, "face1_roll", c->roll1);
 }
 
+/* A blurred copy: halve the picture `levels` times, then grow it back to 1 / 2^keep of the frame
+ * with bilinear filtering (a "dual filter" blur). Only OBS's standard drawing, so it looks the
+ * same on Direct3D, OpenGL and Metal. */
+static gs_texture_t *blur_chain(struct polish *p, gs_texture_t *src, uint32_t w, uint32_t h, int levels, int keep)
+{
+	gs_effect_t *def = obs_get_base_effect(OBS_EFFECT_DEFAULT);
+	if (levels > BLUR_LEVELS)
+		levels = BLUR_LEVELS;
+	if (levels < 1)
+		levels = 1;
+	gs_texture_t *b = src;
+	for (int i = 0; i < levels; i++) {
+		uint32_t lw = w >> (i + 1), lh = h >> (i + 1);
+		draw_into(p->t_down[i], lw ? lw : 1, lh ? lh : 1, def, "Draw", b);
+		b = gs_texrender_get_texture(p->t_down[i]);
+	}
+	for (int i = levels - 1; i >= keep && i >= 1; i--) {
+		uint32_t lw = w >> i, lh = h >> i;
+		draw_into(p->t_up[i], lw ? lw : 1, lh ? lh : 1, def, "Draw", b);
+		b = gs_texrender_get_texture(p->t_up[i]);
+	}
+	return b;
+}
+
+/* The sticker on the largest face, drawn with the current matrices. */
+static void draw_sticker(struct polish *p, const struct pa_face *f, float fw, float fh)
+{
+	gs_effect_t *def = obs_get_base_effect(OBS_EFFECT_DEFAULT);
+	float ex = (f->eye_r.x - f->eye_l.x) * fw, ey = (f->eye_r.y - f->eye_l.y) * fh;
+	float eyedist = sqrtf(ex * ex + ey * ey);
+	float ax = (f->eye_l.x + f->eye_r.x) * 0.5f * fw, ay = (f->eye_l.y + f->eye_r.y) * 0.5f * fh;
+	float width = eyedist * 2.4f, oy = 0.0f; /* glasses sit on the eyes */
+	if (!strcmp(p->sticker, "crown") || !strcmp(p->sticker, "partyhat")) {
+		width = eyedist * 2.6f;
+		oy = -eyedist * 1.75f;
+	} else if (!strcmp(p->sticker, "halo")) {
+		width = eyedist * 2.6f;
+		oy = -eyedist * 2.05f;
+	} else if (!strcmp(p->sticker, "flowercrown")) {
+		width = eyedist * 3.3f;
+		oy = -eyedist * 1.8f;
+	} else if (!strcmp(p->sticker, "devilhorns")) {
+		width = eyedist * 3.0f;
+		oy = -eyedist * 1.75f;
+	} else if (!strcmp(p->sticker, "bunnyears")) {
+		width = eyedist * 2.6f;
+		oy = -eyedist * 2.0f;
+	} else if (!strcmp(p->sticker, "catears")) {
+		width = eyedist * 3.4f;
+		oy = -eyedist * 1.55f;
+	} else if (!strcmp(p->sticker, "hearts")) {
+		width = eyedist * 4.4f;
+		oy = -eyedist * 1.45f;
+	}
+	width *= p->sticker_size;
+	float height = width * (float)p->sticker_img.cy / (float)p->sticker_img.cx;
+	gs_blend_state_push();
+	gs_blend_function(GS_BLEND_SRCALPHA, GS_BLEND_INVSRCALPHA);
+	gs_matrix_push();
+	gs_matrix_translate3f(ax, ay, 0.0f);
+	gs_matrix_rotaa4f(0.0f, 0.0f, 1.0f, f->roll);
+	gs_matrix_translate3f(-width * 0.5f, oy * p->sticker_size - height * 0.5f, 0.0f);
+	gs_effect_set_texture(gs_effect_get_param_by_name(def, "image"), p->sticker_img.texture);
+	while (gs_effect_loop(def, "Draw"))
+		gs_draw_sprite(p->sticker_img.texture, 0, (uint32_t)width, (uint32_t)height);
+	gs_matrix_pop();
+	gs_blend_state_pop();
+}
+
 #define SWAP_PASS()                    \
 	do {                           \
 		gs_texrender_t *t_ = ping; \
@@ -587,7 +790,8 @@ static void pf_render(void *data, gs_effect_t *unused)
 	bool any = p->smooth > 0 || p->brighten > 0 || p->sharpen > 0 || shape || p->foundation > 0 || p->soft_light > 0 ||
 		   eye_makeup || p->lipstick > 0 || p->blush > 0 || p->teeth > 0 || p->eye_bright > 0 || p->bg_mode != BG_OFF ||
 		   (p->lut_loaded && p->look_amt > 0) || p->exposure != 0 || p->warmth != 0 || p->saturation != 0 ||
-		   p->vignette > 0 || p->grain > 0 || strcmp(p->sticker, "none") != 0;
+		   p->vignette != 0 || p->grain > 0 || p->contrast != 0 || strcmp(p->sticker, "none") != 0 ||
+		   (p->style->id != 0 && p->style_amt > 0);
 	if (!any || p->compare || polish_compare_held) {
 		obs_source_skip_video_filter(p->self);
 		return;
@@ -628,6 +832,7 @@ static void pf_render(void *data, gs_effect_t *unused)
 
 	gs_texrender_t *ping = p->t_a, *pong = p->t_b;
 	bool compare = p->compare || polish_compare_held;
+	bool sticker_done = false; /* drawn into the frame already, under an effect */
 	if (compare)
 		goto output;
 
@@ -807,22 +1012,7 @@ static void pf_render(void *data, gs_effect_t *unused)
 
 	/* 5b. soft light: a glow from a blurred copy, and a gentle light on the face */
 	if (p->soft_light > 0) {
-		gs_effect_t *def = obs_get_base_effect(OBS_EFFECT_DEFAULT);
-		const int levels = 4;
-		uint32_t lw = w, lh = h;
-		gs_texture_t *b = cur;
-		for (int i = 0; i < levels; i++) {
-			lw = lw / 2 ? lw / 2 : 1;
-			lh = lh / 2 ? lh / 2 : 1;
-			draw_into(p->t_down[i], lw, lh, def, "Draw", b);
-			b = gs_texrender_get_texture(p->t_down[i]);
-		}
-		for (int i = levels - 1; i >= 2; i--) {
-			lw = w >> i ? w >> i : 1;
-			lh = h >> i ? h >> i : 1;
-			draw_into(p->t_up[i], lw, lh, def, "Draw", b);
-			b = gs_texrender_get_texture(p->t_up[i]);
-		}
+		gs_texture_t *b = blur_chain(p, cur, w, h, 4, 2);
 		set_f(fx, "glow_amt", p->soft_light);
 		gs_effect_set_texture(gs_effect_get_param_by_name(fx, "glow_tex"), b);
 		pass_common(fx, &pc);
@@ -833,8 +1023,8 @@ static void pf_render(void *data, gs_effect_t *unused)
 
 	/* 6. grade */
 	bool look = p->lut_loaded && p->look_amt > 0;
-	if (look || p->exposure != 0 || p->warmth != 0 || p->saturation != 0 || p->sharpen > 0 || p->vignette > 0 ||
-	    p->grain > 0) {
+	if (look || p->exposure != 0 || p->warmth != 0 || p->saturation != 0 || p->sharpen > 0 || p->vignette != 0 ||
+	    p->grain > 0 || p->contrast != 0) {
 		set_f(fx, "vignette", p->vignette);
 		set_f(fx, "grain", p->grain);
 		set_f(fx, "grain_seed", (float)(p->frame % 997));
@@ -845,10 +1035,72 @@ static void pf_render(void *data, gs_effect_t *unused)
 		set_f(fx, "warmth", p->warmth);
 		set_f(fx, "saturation", p->saturation);
 		set_f(fx, "sharpen", p->sharpen);
+		set_f(fx, "contrast", p->contrast);
 		pass_common(fx, &pc);
 		draw_into(ping, w, h, fx, "Grade", cur);
 		cur = gs_texrender_get_texture(ping);
 		SWAP_PASS();
+	}
+
+	/* 7. effects: on everything above, the sticker included */
+	if (p->style->id != 0 && p->style_amt > 0) {
+		if (p->sticker_loaded && r->nfaces > 0) {
+			gs_effect_t *def = obs_get_base_effect(OBS_EFFECT_DEFAULT);
+			gs_texrender_reset(ping);
+			if (gs_texrender_begin(ping, w, h)) {
+				struct vec4 clear;
+				vec4_zero(&clear);
+				gs_clear(GS_CLEAR_COLOR, &clear, 0.0f, 0);
+				gs_ortho(0.0f, fw, 0.0f, fh, -100.0f, 100.0f);
+				gs_blend_state_push();
+				gs_blend_function(GS_BLEND_ONE, GS_BLEND_ZERO);
+				gs_effect_set_texture(gs_effect_get_param_by_name(def, "image"), cur);
+				while (gs_effect_loop(def, "Draw"))
+					gs_draw_sprite(cur, 0, w, h);
+				gs_blend_state_pop();
+				draw_sticker(p, &r->faces[0], fw, fh);
+				gs_texrender_end(ping);
+				cur = gs_texrender_get_texture(ping);
+				SWAP_PASS();
+				sticker_done = true;
+			}
+		}
+		const struct style *st = p->style;
+		set_f(fx, "style_id", (float)st->id);
+		set_f(fx, "style_amt", p->style_amt);
+		set_f(fx, "style_k", p->style_k);
+		set_f(fx, "style_time", (float)p->frame / 30.0f);
+		set_f(fx, "style_seed", (float)((p->frame / 2) % 9973));
+		color_v4(fx, "style_c1", p->style_c1, 1.0f);
+		color_v4(fx, "style_c2", p->style_c2, 1.0f);
+		if (st->id == STYLE_ECHO) {
+			gs_effect_t *def = obs_get_base_effect(OBS_EFFECT_DEFAULT);
+			if (!p->hist_valid || p->hist_w != w || p->hist_h != h) {
+				draw_into(p->t_hist, w, h, def, "Draw", cur);
+				p->hist_w = w;
+				p->hist_h = h;
+				p->hist_valid = true;
+			}
+			gs_effect_set_texture(gs_effect_get_param_by_name(fx, "hist_tex"), gs_texrender_get_texture(p->t_hist));
+			gs_effect_set_texture(gs_effect_get_param_by_name(fx, "blur_tex"), cur);
+			pass_common(fx, &pc);
+			draw_into(ping, w, h, fx, "Echo", cur);
+			cur = gs_texrender_get_texture(ping);
+			SWAP_PASS();
+			draw_into(p->t_hist, w, h, def, "Draw", cur); /* this output is the next frame's trail */
+		} else {
+			int levels = st->blur < 0 ? 1 + (int)roundf(p->style_k * 5.0f) : st->blur;
+			gs_texture_t *b = levels > 0 ? blur_chain(p, cur, w, h, levels, levels >= 4 ? 2 : 1) : cur;
+			/* always bind both: Metal stops on an unbound texture */
+			gs_effect_set_texture(gs_effect_get_param_by_name(fx, "blur_tex"), b);
+			gs_effect_set_texture(gs_effect_get_param_by_name(fx, "hist_tex"), cur);
+			pass_common(fx, &pc);
+			draw_into(ping, w, h, fx, "Style", cur);
+			cur = gs_texrender_get_texture(ping);
+			SWAP_PASS();
+		}
+	} else {
+		p->hist_valid = false;
 	}
 
 output:;
@@ -862,48 +1114,8 @@ output:;
 		gs_draw_sprite(out, 0, w, h);
 	gs_blend_state_pop();
 
-	if (!compare && p->sticker_loaded && r->nfaces > 0) {
-		const struct pa_face *f = &r->faces[0];
-		float ex = (f->eye_r.x - f->eye_l.x) * fw, ey = (f->eye_r.y - f->eye_l.y) * fh;
-		float eyedist = sqrtf(ex * ex + ey * ey);
-		float ax = (f->eye_l.x + f->eye_r.x) * 0.5f * fw, ay = (f->eye_l.y + f->eye_r.y) * 0.5f * fh;
-		float width = eyedist * 2.4f, oy = 0.0f; /* glasses sit on the eyes */
-		if (!strcmp(p->sticker, "crown") || !strcmp(p->sticker, "partyhat")) {
-			width = eyedist * 2.6f;
-			oy = -eyedist * 1.75f;
-		} else if (!strcmp(p->sticker, "halo")) {
-			width = eyedist * 2.6f;
-			oy = -eyedist * 2.05f;
-		} else if (!strcmp(p->sticker, "flowercrown")) {
-			width = eyedist * 3.3f;
-			oy = -eyedist * 1.8f;
-		} else if (!strcmp(p->sticker, "devilhorns")) {
-			width = eyedist * 3.0f;
-			oy = -eyedist * 1.75f;
-		} else if (!strcmp(p->sticker, "bunnyears")) {
-			width = eyedist * 2.6f;
-			oy = -eyedist * 2.0f;
-		} else if (!strcmp(p->sticker, "catears")) {
-			width = eyedist * 3.4f;
-			oy = -eyedist * 1.55f;
-		} else if (!strcmp(p->sticker, "hearts")) {
-			width = eyedist * 4.4f;
-			oy = -eyedist * 1.45f;
-		}
-		width *= p->sticker_size;
-		float height = width * (float)p->sticker_img.cy / (float)p->sticker_img.cx;
-		gs_blend_state_push();
-		gs_blend_function(GS_BLEND_SRCALPHA, GS_BLEND_INVSRCALPHA);
-		gs_matrix_push();
-		gs_matrix_translate3f(ax, ay, 0.0f);
-		gs_matrix_rotaa4f(0.0f, 0.0f, 1.0f, f->roll);
-		gs_matrix_translate3f(-width * 0.5f, oy * p->sticker_size - height * 0.5f, 0.0f);
-		gs_effect_set_texture(gs_effect_get_param_by_name(def, "image"), p->sticker_img.texture);
-		while (gs_effect_loop(def, "Draw"))
-			gs_draw_sprite(p->sticker_img.texture, 0, (uint32_t)width, (uint32_t)height);
-		gs_matrix_pop();
-		gs_blend_state_pop();
-	}
+	if (!compare && p->sticker_loaded && r->nfaces > 0 && !sticker_done)
+		draw_sticker(p, &r->faces[0], fw, fh);
 }
 
 /* ------------------------------------------------------------------ status for tests */

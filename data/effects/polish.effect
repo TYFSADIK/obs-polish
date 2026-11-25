@@ -7,6 +7,8 @@ uniform texture2d lut_tex;
 uniform texture2d mouth_tex;  // R: lips, G: mouth interior
 uniform texture2d eyes_tex;   // R: brows, G: eyeshadow, B: eyeliner, A: iris
 uniform texture2d glow_tex;   // a blurred copy of the frame, for soft light
+uniform texture2d blur_tex;   // a blurred copy of the frame, for the effects
+uniform texture2d hist_tex;   // the previous output, for echo
 
 uniform float2 size;          // frame size in pixels
 uniform float2 texel;         // 1 / size
@@ -72,6 +74,16 @@ uniform float exposure;       // -0.5..0.5
 uniform float warmth;         // -1..1
 uniform float saturation;     // -1..1
 uniform float sharpen;        // 0..1
+uniform float contrast;       // -0.5..0.5
+
+// effects
+uniform float style_id;       // which effect (see STYLES in polish-filter.c)
+uniform float style_amt;      // strength, 0..1
+uniform float style_k;        // the effect's own setting, 0..1
+uniform float style_time;     // seconds of video, for moving effects
+uniform float style_seed;     // changes every few frames, for random effects
+uniform float4 style_c1;      // first colour
+uniform float4 style_c2;      // second colour
 
 sampler_state linear_clamp {
 	Filter   = Linear;
@@ -349,6 +361,478 @@ float4 PSGlow(VertData v_in) : TARGET
 	return float4(rgb, c.a);
 }
 
+// ------------------------------------------------------------------ effects
+// One pass, one effect at a time, chosen by style_id. Reads use SampleLevel so Direct3D accepts
+// them inside the branches and loops; loops have fixed counts; there are no arrays, so the same
+// code compiles to HLSL, GLSL and Metal. Sizes are given for 1080p and scaled by size.y / 1080.
+// (No helper may be a function of no arguments that reads a uniform: OBS's Metal translator
+// rejects those. Only the entry point reads blur_tex: Metal binds the wrong texture when a helper
+// samples one other than image, so the blurred colour at this pixel is passed in as bc.)
+
+float3 tx(float2 uv) { return image.SampleLevel(linear_clamp, uv, 0.0).rgb; }
+float hash2(float2 p) { return frac(sin(dot(p, float2(12.9898, 78.233))) * 43758.5453); }
+float posmod(float x, float y) { return x - y * floor(x / y); }
+float3 sat3(float3 c, float s) { float y = luma(c); return lerp(float3(y, y, y), c, s); }
+float3 contrast3(float3 c, float k) { return (c - 0.5) * k + 0.5; }
+float3 screen3(float3 a, float3 b) { return 1.0 - (1.0 - a) * (1.0 - b); }
+
+float3 rgb2hsv(float3 c)
+{
+	float4 K = float4(0.0, -1.0 / 3.0, 2.0 / 3.0, -1.0);
+	float4 p = lerp(float4(c.bg, K.wz), float4(c.gb, K.xy), step(c.b, c.g));
+	float4 q = lerp(float4(p.xyw, c.r), float4(c.r, p.yzx), step(p.x, c.r));
+	float d = q.x - min(q.w, q.y);
+	return float3(abs(q.z + (q.w - q.y) / (6.0 * d + 1e-10)), d / (q.x + 1e-10), q.x);
+}
+
+float sobel(float2 uv, float r)
+{
+	float2 o = texel * r;
+	float tl = luma(tx(uv + float2(-o.x, -o.y))), t = luma(tx(uv + float2(0.0, -o.y))), tr = luma(tx(uv + float2(o.x, -o.y)));
+	float l = luma(tx(uv + float2(-o.x, 0.0))), rr = luma(tx(uv + float2(o.x, 0.0)));
+	float bl_ = luma(tx(uv + float2(-o.x, o.y))), b = luma(tx(uv + float2(0.0, o.y))), br = luma(tx(uv + float2(o.x, o.y)));
+	float gx = (tr + 2.0 * rr + br) - (tl + 2.0 * l + bl_);
+	float gy = (bl_ + 2.0 * b + br) - (tl + 2.0 * t + tr);
+	return sqrt(gx * gx + gy * gy);
+}
+
+float3 heat(float y)
+{
+	float3 c0 = float3(0.0, 0.0, 0.12), c1 = float3(0.3, 0.0, 0.6), c2 = float3(0.9, 0.05, 0.3);
+	float3 c3 = float3(1.0, 0.55, 0.0), c4 = float3(1.0, 1.0, 0.8);
+	if (y < 0.25)
+		return lerp(c0, c1, y / 0.25);
+	if (y < 0.5)
+		return lerp(c1, c2, (y - 0.25) / 0.25);
+	if (y < 0.75)
+		return lerp(c2, c3, (y - 0.5) / 0.25);
+	return lerp(c3, c4, saturate((y - 0.75) / 0.25));
+}
+
+float bayer2(float2 a) { a = floor(a); return frac(a.x / 2.0 + a.y * a.y * 0.75); }
+float bayer4(float2 a) { return bayer2(0.5 * a) * 0.25 + bayer2(a); }
+
+// 1-12: colour and tone
+float3 fx_colour(float id, float3 c, float k)
+{
+	float y = luma(c);
+	if (id < 1.5)
+		return float3(y, y, y);
+	if (id < 2.5)
+		return saturate(float3(dot(c, float3(0.393, 0.769, 0.189)), dot(c, float3(0.349, 0.686, 0.168)),
+				       dot(c, float3(0.272, 0.534, 0.131))));
+	if (id < 3.5) { // teal and orange: shadows to teal, skin and highlights to orange
+		float3 tone = lerp(float3(0.0, 0.42, 0.48), float3(1.0, 0.6, 0.3), smoothstep(0.15, 0.8, y));
+		return saturate(sat3(soft_light(c, tone), 1.15));
+	}
+	if (id < 4.5)
+		return 1.0 - c;
+	if (id < 5.5)
+		return saturate(style_c1.rgb * (y / max(luma(style_c1.rgb), 0.1)));
+	if (id < 6.5)
+		return lerp(style_c1.rgb, style_c2.rgb, smoothstep(0.05, 0.95, y));
+	if (id < 7.5) { // bleach bypass: luminance overlaid on the colour, less colour, more contrast
+		float3 L = float3(y, y, y);
+		float3 ov = lerp(2.0 * c * L, 1.0 - 2.0 * (1.0 - c) * (1.0 - L), step(0.5, L));
+		return saturate(contrast3(lerp(L, ov, 0.55), 1.25));
+	}
+	if (id < 8.5) { // cross-process: hard reds, lifted blues, yellow-green shadows
+		float3 s;
+		s.r = c.r * c.r * (3.0 - 2.0 * c.r);
+		s.r = s.r * s.r * (3.0 - 2.0 * s.r) * 0.9 + 0.08;
+		s.g = c.g * c.g * (3.0 - 2.0 * c.g) * 0.95 + 0.04;
+		s.b = c.b * 0.7 + 0.18;
+		return saturate(sat3(s, 1.25));
+	}
+	if (id < 9.5) { // golden hour
+		float3 s = c * float3(1.12, 1.0, 0.78) + float3(0.04, 0.02, 0.0);
+		return saturate(lerp(s, float3(1.0, 0.85, 0.6) * y * 1.1, 0.15));
+	}
+	if (id < 10.5) // moonlight
+		return saturate(sat3(c, 0.55) * float3(0.78, 0.9, 1.15) * 0.92 - 0.01);
+	if (id < 11.5) { // cyberpunk: deep blue-violet shadows, magenta mids, cyan highlights
+		float3 tone = lerp(lerp(float3(0.15, 0.0, 0.45), float3(1.0, 0.1, 0.75), smoothstep(0.05, 0.5, y)),
+				   float3(0.1, 0.95, 1.0), smoothstep(0.5, 0.95, y));
+		return saturate(contrast3(sat3(soft_light(c, tone), 1.5), 1.15));
+	}
+	// 12: colour pass, keep colours near the chosen one
+	float3 h = rgb2hsv(c), h1 = rgb2hsv(style_c1.rgb);
+	float dh = abs(h.x - h1.x);
+	dh = min(dh, 1.0 - dh);
+	float range = 0.03 + k * 0.15;
+	float keep = (1.0 - smoothstep(range, range + 0.04, dh)) * smoothstep(0.12, 0.25, h.y);
+	return lerp(float3(y, y, y), c, keep);
+}
+
+// 15-20: light
+float3 fx_light(float id, float3 c, float3 bc, float2 uv, float k)
+{
+	float y = luma(c);
+	if (id < 15.5) { // HDR: compress the broad light, boost the detail
+		float3 b = bc;
+		float by = max(luma(b), 1e-3);
+		float by2 = pow(by, 0.7) * 0.85 + 0.06;
+		float3 base = b * (by2 / by);
+		return saturate(sat3(base + (c - b) * (1.4 + k * 1.6), 1.15));
+	}
+	if (id < 16.5) { // bloom
+		float thr = 0.85 - k * 0.5;
+		float3 g = max(bc - thr, 0.0) / (1.0 - thr);
+		return saturate(screen3(c, g * 1.3));
+	}
+	if (id < 17.5) { // solarize
+		float thr = 0.3 + (1.0 - k) * 0.6;
+		return lerp(c, 1.0 - c, step(thr, c));
+	}
+	if (id < 18.5) { // posterize
+		float L = 2.0 + floor(k * 10.0);
+		return floor(c * (L - 1.0) + 0.5) / (L - 1.0);
+	}
+	if (id < 19.5) { // threshold
+		float v = step(0.2 + k * 0.6, y);
+		return float3(v, v, v);
+	}
+	// 20: light leak, warm light drifting in from the edges
+	float t = style_time * (0.2 + k * 1.2);
+	float2 a = float2(-0.05 + 0.12 * sin(t * 0.7), 0.25 + 0.3 * sin(t * 0.37));
+	float2 b = float2(1.05 + 0.1 * sin(t * 0.53 + 1.0), 0.7 + 0.25 * sin(t * 0.41 + 2.0));
+	float2 asp = float2(size.x / size.y, 1.0);
+	float ga = exp(-dot((uv - a) * asp, (uv - a) * asp) / 0.12) * (0.75 + 0.25 * sin(t * 1.3));
+	float gb = exp(-dot((uv - b) * asp, (uv - b) * asp) / 0.08) * (0.7 + 0.3 * sin(t * 0.9 + 1.5));
+	float3 leak = float3(1.0, 0.45, 0.1) * ga + float3(1.0, 0.15, 0.12) * gb;
+	return saturate(screen3(c, leak * 0.95));
+}
+
+// 21-28: blur and sharpen; the strength sets how far each reaches
+float3 fx_blur(float id, float3 c, float3 bc, float2 uv, float k, float a)
+{
+	float sp = (size.y / 1080.0);
+	if (id < 21.5)
+		return lerp(c, bc, a);
+	if (id < 22.5) { // motion blur along an angle
+		float ang = k * 3.14159;
+		float2 d = float2(cos(ang), sin(ang)) * texel * (a * 70.0 * sp);
+		float3 acc = float3(0.0, 0.0, 0.0);
+		for (int i = 0; i < 16; i++)
+			acc += tx(uv + d * (float(i) / 15.0 - 0.5));
+		return acc / 16.0;
+	}
+	if (id < 23.5) { // zoom blur towards the centre
+		float3 acc = float3(0.0, 0.0, 0.0);
+		float amt = a * (0.05 + k * 0.25);
+		for (int i = 0; i < 16; i++)
+			acc += tx(0.5 + (uv - 0.5) * (1.0 - amt * float(i) / 15.0));
+		return acc / 16.0;
+	}
+	if (id < 24.5) { // tilt-shift: sharp band, blurred above and below, a little more colour
+		float m = smoothstep(0.06, 0.32, abs(uv.y - (0.25 + k * 0.5)));
+		float3 s = lerp(c, bc, m * a);
+		return saturate(contrast3(sat3(s, 1.0 + 0.35 * a), 1.0 + 0.1 * a));
+	}
+	if (id < 25.5) { // box blur
+		float r = (2.0 + k * 14.0) * sp * a;
+		float3 acc = float3(0.0, 0.0, 0.0);
+		for (int j = 0; j < 5; j++)
+			for (int i = 0; i < 5; i++)
+				acc += tx(uv + float2(float(i) - 2.0, float(j) - 2.0) * 0.5 * r * texel);
+		return acc / 25.0;
+	}
+	if (id < 26.5) { // lens blur: a disc, where bright points grow into orbs
+		float r = (4.0 + k * 22.0) * sp * a;
+		float3 acc = float3(0.0, 0.0, 0.0);
+		float ws = 0.0;
+		for (int i = 0; i < 32; i++) {
+			float fi = float(i);
+			float rad = sqrt((fi + 0.5) / 32.0) * r;
+			float an = fi * 2.39996;
+			float3 s = tx(uv + float2(cos(an), sin(an)) * rad * texel);
+			float w = 1.0 + 8.0 * pow(saturate((luma(s) - 0.65) / 0.35), 2.0);
+			acc += s * w;
+			ws += w;
+		}
+		return acc / ws;
+	}
+	if (id < 27.5) // unsharp mask
+		return saturate(c + (c - bc) * a * (0.6 + k * 2.4));
+	// 28: denoise, an edge-keeping average
+	float3 acc = c;
+	float wsum = 1.0;
+	float r = (1.0 + k * 3.0) * sp;
+	for (int ring = 1; ring <= 2; ring++)
+		for (int i = 0; i < 8; i++) {
+			float an = (float(i) + 0.5 * float(ring)) * 0.785398;
+			float3 s = tx(uv + float2(cos(an), sin(an)) * r * float(ring) * texel);
+			float3 d = s - c;
+			float w = exp(-dot(d, d) / 0.006) * exp(-float(ring * ring) / 4.0);
+			acc += s * w;
+			wsum += w;
+		}
+	return lerp(c, acc / wsum, a);
+}
+
+// 29-37: retro, analog and texture
+float3 fx_retro(float id, float3 c, float3 bc, float2 uv, float k)
+{
+	float2 pos = uv * size;
+	float sp = (size.y / 1080.0);
+	float y = luma(c);
+	if (id < 29.5) { // film grain, in clumps of a chosen size
+		float gs = (1.0 + k * 3.0) * sp;
+		float n = hash2(floor(pos / gs) + style_seed * 7.13) - 0.5;
+		return saturate(c + n * 0.3 * (1.0 - abs(y - 0.5)));
+	}
+	if (id < 30.5) { // VHS
+		float line = floor(pos.y / (2.0 * sp));
+		float j = (hash2(float2(line, style_seed)) - 0.5) * 0.003;
+		float band = frac(style_time * 0.12);
+		float inb = smoothstep(0.0, 0.015, uv.y - band) * (1.0 - smoothstep(0.015, 0.045, uv.y - band));
+		j += inb * (hash2(float2(line, style_seed + 3.0)) - 0.5) * 0.03;
+		float2 u2 = uv + float2(j, 0.0);
+		// soft picture and colour that bleeds to the right, from a few horizontal taps
+		float3 soft = (tx(u2 - float2(2.0 * sp * texel.x, 0.0)) + tx(u2) + tx(u2 + float2(2.0 * sp * texel.x, 0.0))) / 3.0;
+		float Y = luma(lerp(tx(u2), soft, 0.5 + k * 0.4));
+		float3 cb = float3(0.0, 0.0, 0.0);
+		for (int i = 0; i < 6; i++)
+			cb += tx(u2 + float2((2.0 + float(i) * 1.5) * sp * texel.x, 0.0));
+		cb /= 6.0;
+		float3 s = Y + (cb - luma(cb)) * 1.15;
+		s = sat3(s, 0.85) * float3(1.04, 1.0, 0.95);
+		s += (hash2(pos + style_seed) - 0.5) * 0.06 + inb * 0.15 * hash2(float2(pos.x, style_seed));
+		s *= 0.94 + 0.06 * step(0.5, frac(pos.y / (2.0 * sp)));
+		return saturate(s);
+	}
+	if (id < 31.5) { // CRT: curved glass, scanlines, a shadow mask, brighter to make up for them
+		float2 d = uv - 0.5;
+		d *= 1.0 + dot(d, d) * 0.22;
+		float2 u2 = 0.5 + d;
+		if (u2.x < 0.0 || u2.x > 1.0 || u2.y < 0.0 || u2.y > 1.0)
+			return float3(0.0, 0.0, 0.0);
+		float3 s = tx(u2);
+		float lines = (2.0 + k * 4.0) * sp;
+		float scan = 0.72 + 0.28 * sin(u2.y * size.y / lines * 3.14159 * 2.0);
+		float m = posmod(floor(u2.x * size.x / max(sp, 1.0)), 3.0);
+		float3 mask = float3(m < 0.5 ? 1.15 : 0.9, (m > 0.5 && m < 1.5) ? 1.15 : 0.9, m > 1.5 ? 1.15 : 0.9);
+		float v = 1.0 - 0.6 * smoothstep(0.3, 0.75, length(d));
+		return saturate(s * scan * mask * v * 1.25);
+	}
+	if (id < 32.5) { // Super 8: gate weave, warm faded colour, heavy grain, flicker, rounded gate
+		float2 w = float2(hash2(float2(style_seed, 1.0)) - 0.5, hash2(float2(style_seed, 2.0)) - 0.5) * float2(0.004, 0.006);
+		float3 s = tx(uv + w);
+		s = s * float3(1.08, 1.0, 0.8) + float3(0.04, 0.015, -0.01);
+		s = s * 0.85 + 0.06;
+		s += (hash2(floor(pos / (2.0 * sp)) + style_seed) - 0.5) * (0.12 + k * 0.15);
+		s *= 1.0 + (hash2(float2(style_seed, 5.0)) - 0.5) * 0.1;
+		float2 q = abs(uv - 0.5) * 2.0 - (1.0 - 0.1);
+		float rr = length(max(q, 0.0)) - 0.06;
+		s *= 1.0 - smoothstep(-0.01, 0.005, rr);
+		float2 dv = (uv - 0.5) * float2(size.x / size.y, 1.0);
+		s *= 1.0 - 0.45 * smoothstep(0.35, 0.95, length(dv));
+		return saturate(s);
+	}
+	if (id < 33.5) { // old film: faded sepia, flicker, scratches, dust
+		float3 s = lerp(float3(y, y, y), float3(dot(c, float3(0.393, 0.769, 0.189)), dot(c, float3(0.349, 0.686, 0.168)),
+							 dot(c, float3(0.272, 0.534, 0.131))), 0.6);
+		s *= 1.0 + (hash2(float2(style_seed, 9.0)) - 0.5) * 0.16;
+		for (int i = 0; i < 3; i++) {
+			float fi = float(i);
+			float x = hash2(float2(style_seed, 20.0 + fi));
+			float on = step(0.45 - k * 0.3, hash2(float2(style_seed, 30.0 + fi)));
+			float d = abs(uv.x - x) * size.x / sp;
+			s = lerp(s, s * 0.55 + 0.25, on * (1.0 - smoothstep(0.6, 1.6, d)));
+		}
+		float dust = step(0.9985 - k * 0.0015, hash2(floor(pos / (3.0 * sp)) + style_seed * 3.7));
+		s = lerp(s, float3(0.08, 0.06, 0.05), dust);
+		float2 dv = (uv - 0.5) * float2(size.x / size.y, 1.0);
+		s *= 1.0 - 0.55 * smoothstep(0.3, 0.95, length(dv));
+		return saturate(s);
+	}
+	if (id < 34.5) { // colour halftone: cyan, magenta and yellow dots on screens at different angles
+		float cell = (5.0 + k * 14.0) * sp;
+		float3 outc = float3(1.0, 1.0, 1.0);
+		for (int ch = 0; ch < 3; ch++) {
+			float an = ch == 0 ? 0.26 : (ch == 1 ? 1.31 : 0.0);
+			float cs = cos(an), sn = sin(an);
+			float2 rp = float2(cs * pos.x + sn * pos.y, -sn * pos.x + cs * pos.y);
+			float2 cc = (floor(rp / cell) + 0.5) * cell;
+			float2 back = float2(cs * cc.x - sn * cc.y, sn * cc.x + cs * cc.y);
+			float3 sc = tx(back * texel);
+			float ink = 1.0 - (ch == 0 ? sc.r : (ch == 1 ? sc.g : sc.b));
+			float rad = sqrt(ink) * cell * 0.7;
+			float cov = 1.0 - smoothstep(rad - 1.0, rad + 1.0, length(rp - cc));
+			if (ch == 0)
+				outc.r -= cov;
+			else if (ch == 1)
+				outc.g -= cov;
+			else
+				outc.b -= cov;
+		}
+		return saturate(outc);
+	}
+	if (id < 35.5) { // RGB split, wider towards the edges
+		float2 off = (uv - 0.5) * (0.006 + k * 0.03);
+		return float3(tx(uv + off).r, c.g, tx(uv - off).b);
+	}
+	if (id < 36.5) { // ordered dither to a few levels, in chunky pixels
+		float L = 2.0 + floor(k * 6.0);
+		float2 pp = floor(pos / (2.0 * max(sp, 0.5)));
+		float th = bayer4(pp) - 0.5;
+		return saturate(floor(c * (L - 1.0) + 0.5 + th) / (L - 1.0));
+	}
+	// 37: lomo
+	float3 s = contrast3(sat3(c, 1.4), 1.3);
+	s += lerp(float3(-0.03, 0.0, 0.06), float3(0.06, 0.04, -0.05), smoothstep(0.2, 0.8, y));
+	float2 dv = (uv - 0.5) * float2(size.x / size.y, 1.0);
+	s *= 1.0 - (0.5 + k * 0.4) * smoothstep(0.25, 0.9, length(dv));
+	return saturate(s);
+}
+
+// 38-49: distortion and stylisation
+float3 fx_distort(float id, float3 c, float3 bc, float2 uv, float k, float a)
+{
+	float2 pos = uv * size;
+	float sp = (size.y / 1080.0);
+	float asp = size.x / size.y;
+	if (id < 38.5) { // glitch: bands slide sideways, split colour, and blocks go wrong
+		float seed = style_seed;
+		float rows = 6.0 + hash2(float2(seed, 1.0)) * 24.0;
+		float band = floor(uv.y * rows);
+		float hit = step(1.0 - 0.45 * a, hash2(float2(band, seed)));
+		float shift = (hash2(float2(band, seed + 1.0)) - 0.5) * 0.18 * a * hit;
+		float2 u2 = uv + float2(shift, 0.0);
+		float split = 0.012 * a * hit * (0.5 + k);
+		float3 s = float3(tx(u2 + float2(split, 0.0)).r, tx(u2).g, tx(u2 - float2(split, 0.0)).b);
+		float blk = hash2(float2(floor(uv.x * 14.0), floor(uv.y * 10.0)) + seed * 1.7);
+		if (blk > 1.0 - 0.06 * a)
+			s = 1.0 - s;
+		else if (blk > 1.0 - 0.1 * a)
+			s = s.gbr;
+		return s;
+	}
+	if (id < 39.5) { // pixelate
+		float bs = max(1.0, (4.0 + k * 44.0) * sp * a);
+		return tx((floor(pos / bs) + 0.5) * bs * texel);
+	}
+	if (id < 40.5) { // fisheye: the centre swells, the edges stay
+		float2 d = (uv - 0.5) * float2(asp, 1.0);
+		float r = length(d);
+		float kk = a * (0.4 + k * 1.4);
+		float2 src = d * (1.0 + kk * (r * r - 0.25));
+		float2 u2 = 0.5 + src / float2(asp, 1.0);
+		if (u2.x < 0.0 || u2.x > 1.0 || u2.y < 0.0 || u2.y > 1.0)
+			return float3(0.0, 0.0, 0.0);
+		return tx(u2);
+	}
+	if (id < 41.5) { // mirror (2 slices) or kaleidoscope (more)
+		float n = 2.0 + floor(k * 10.0);
+		float3 s;
+		if (n < 2.5) {
+			s = tx(float2(0.5 - abs(uv.x - 0.5), uv.y));
+		} else {
+			float2 d = (uv - 0.5) * float2(asp, 1.0);
+			float seg = 6.28318 / n;
+			float an = atan2(d.y, d.x);
+			an = abs(posmod(an, seg) - seg * 0.5);
+			float r = length(d);
+			s = tx(0.5 + float2(cos(an), sin(an)) * r / float2(asp, 1.0));
+		}
+		return lerp(c, s, a);
+	}
+	if (id < 42.5) { // wave
+		float wl = 0.02 + k * 0.15;
+		float amp = a * 0.012;
+		float2 u2 = uv + float2(sin(uv.y / wl * 6.28318 + style_time * 3.0) * amp,
+					cos(uv.x / wl * 6.28318 + style_time * 2.4) * amp * 0.6);
+		return tx(u2);
+	}
+	if (id < 43.5) { // twirl
+		float2 d = (uv - 0.5) * float2(asp, 1.0);
+		float r = length(d);
+		float t = saturate(1.0 - r / 0.45);
+		float an = a * (1.0 + k * 6.0) * t * t;
+		float cs = cos(an), sn = sin(an);
+		float2 rd = float2(cs * d.x - sn * d.y, sn * d.x + cs * d.y);
+		return tx(0.5 + rd / float2(asp, 1.0));
+	}
+	if (id < 44.5) { // emboss
+		float2 o = texel * (1.0 + k * 2.0) * sp;
+		float g = saturate(0.5 + luma(tx(uv - o) - tx(uv + o)) * 2.5);
+		return lerp(c, float3(g, g, g), a);
+	}
+	if (id < 45.5) { // edges as glowing lines on black
+		float m = sobel(uv, (1.0 + k * 2.0) * sp);
+		float3 s = style_c1.rgb * smoothstep(0.05, 0.4, m) * 1.4;
+		return lerp(c, saturate(s), a);
+	}
+	if (id < 46.5) { // cartoon: flat colour and ink lines
+		float3 base = floor(bc * 6.0 + 0.5) / 6.0;
+		float m = sobel(uv, 1.5 * sp);
+		float ink = smoothstep(0.22 - k * 0.14, 0.4 - k * 0.2, m);
+		return lerp(c, base * (1.0 - ink), a);
+	}
+	if (id < 47.5) { // oil paint: Kuwahara, the calmest of four neighbourhoods wins
+		float r = (4.0 + k * 14.0) * sp;
+		float3 best = c;
+		float bestv = 1e9;
+		for (int q = 0; q < 4; q++) {
+			float2 dir = float2(q == 0 || q == 2 ? -1.0 : 1.0, q < 2 ? -1.0 : 1.0);
+			float3 m = float3(0.0, 0.0, 0.0), m2 = float3(0.0, 0.0, 0.0);
+			for (int j = 0; j < 3; j++)
+				for (int i = 0; i < 3; i++) {
+					float3 s = tx(uv + dir * float2(float(i), float(j)) * (r / 2.0) * texel);
+					m += s;
+					m2 += s * s;
+				}
+			m /= 9.0;
+			float3 v = m2 / 9.0 - m * m;
+			float vs = v.r + v.g + v.b;
+			if (vs < bestv) {
+				bestv = vs;
+				best = m;
+			}
+		}
+		return lerp(c, best, a);
+	}
+	if (id < 48.5) { // thermal
+		float y = luma(lerp(c, bc, 0.5));
+		return lerp(c, heat(saturate((y - 0.05) * (1.1 + k))), a);
+	}
+	// 49: night vision
+	float y = luma(c) * (1.6 + k * 1.2) + 0.04;
+	float3 s = float3(0.12, 1.0, 0.25) * y + (hash2(pos + style_seed) - 0.5) * 0.14;
+	s *= 0.9 + 0.1 * sin(pos.y / sp * 1.5);
+	float2 dv = (uv - 0.5) * float2(asp, 1.0);
+	s *= 1.0 - smoothstep(0.4, 0.62, length(dv));
+	return lerp(c, saturate(s), a);
+}
+
+float4 PSStyle(VertData v_in) : TARGET
+{
+	float4 c4 = image.SampleLevel(linear_clamp, v_in.uv, 0.0);
+	float3 c = c4.rgb, o = c;
+	float3 bc = blur_tex.SampleLevel(linear_clamp, v_in.uv, 0.0).rgb;
+	float id = style_id, a = style_amt, k = style_k;
+	if (id < 12.5)
+		o = lerp(c, fx_colour(id, c, k), a);
+	else if (id < 20.5)
+		o = lerp(c, fx_light(id, c, bc, v_in.uv, k), a);
+	else if (id < 28.5)
+		o = fx_blur(id, c, bc, v_in.uv, k, a);
+	else if (id < 37.5)
+		o = lerp(c, fx_retro(id, c, bc, v_in.uv, k), a);
+	else
+		o = fx_distort(id, c, bc, v_in.uv, k, a);
+	return float4(saturate(o), c4.a);
+}
+
+// Echo: the frame blended with the previous output, so moving things leave fading trails.
+float4 PSEcho(VertData v_in) : TARGET
+{
+	float4 c = image.SampleLevel(linear_clamp, v_in.uv, 0.0);
+	float3 h = hist_tex.SampleLevel(linear_clamp, v_in.uv, 0.0).rgb;
+	float decay = style_amt * (0.5 + style_k * 0.45);
+	return float4(lerp(c.rgb, h, decay), c.a);
+}
+
 float3 lut_sample(float3 c)
 {
 	float b = saturate(c.b) * 63.0;
@@ -378,12 +862,18 @@ float4 PSGrade(VertData v_in) : TARGET
 	rgb.b -= warmth * 0.06;
 	float y = luma(rgb);
 	rgb = lerp(float3(y, y, y), rgb, 1.0 + saturation);
+	rgb = (rgb - 0.5) * (1.0 + contrast * 1.4) + 0.5;
 	rgb = saturate(rgb);
 	if (lut_amt > 0.0)
 		rgb = lerp(rgb, lut_sample(rgb), lut_amt);
-	if (vignette > 0.0) {
+	if (vignette != 0.0) {
+		// positive darkens the corners, negative lightens them
 		float2 d = (v_in.uv - 0.5) * float2(size.x / size.y, 1.0);
-		rgb *= 1.0 - vignette * 0.75 * smoothstep(0.35, 0.95, length(d) * 1.25);
+		float m = smoothstep(0.35, 0.95, length(d) * 1.25);
+		if (vignette > 0.0)
+			rgb *= 1.0 - vignette * 0.75 * m;
+		else
+			rgb = lerp(rgb, float3(1.0, 1.0, 1.0), -vignette * 0.6 * m);
 	}
 	if (grain > 0.0) {
 		float n = frac(sin(dot(v_in.uv * size + grain_seed, float2(12.9898, 78.233))) * 43758.5453) - 0.5;
@@ -398,3 +888,5 @@ technique Warp      { pass { vertex_shader = VSDefault(v_in); pixel_shader = PSW
 technique Composite { pass { vertex_shader = VSDefault(v_in); pixel_shader = PSComposite(v_in); } }
 technique Grade     { pass { vertex_shader = VSDefault(v_in); pixel_shader = PSGrade(v_in); } }
 technique Glow      { pass { vertex_shader = VSDefault(v_in); pixel_shader = PSGlow(v_in); } }
+technique Style     { pass { vertex_shader = VSDefault(v_in); pixel_shader = PSStyle(v_in); } }
+technique Echo      { pass { vertex_shader = VSDefault(v_in); pixel_shader = PSEcho(v_in); } }

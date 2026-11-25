@@ -8,6 +8,10 @@ Demo renders, with render-test (see tests/render_test.c):
     demo_after.png    {"smooth":60,"brighten":35,"lipstick":35,"blush":30,"look":"golden",
                        "look_strength":70,"bg_mode":1,"bg_blur":70}
     bg_blur, bg_color, bgp_studio, bgp_bokeh, bgp_sunset, bgimg    the background modes
+    doc_<name>.png    the face and eye galleries, default colours, every other effect off:
+                      foundation 100, soft_light 70, vline 100 + chin 40, nose_slim 100, lip_fill 100,
+                      eyeshadow 100, eyeliner 100, brows 100, eye_color 100, and doc_eyes_all with
+                      eyeshadow 60, eyeliner 70, brows 50, eye_color 60
 """
 import math
 from pathlib import Path
@@ -78,6 +82,31 @@ def backgrounds():
     o.save(DOCS / "background.jpg", quality=86)
 
 
+FACE = (380, 180, 580, 380)  # the test portrait's face, in its 960 x 1200 frame
+EYES = (415, 200, 545, 265)  # and its eyes
+
+
+def gallery(tiles, box, tile_w, cols, out):
+    f = font(BOLD, 18)
+    bw, bh = box[2] - box[0], box[3] - box[1]
+    tile_h = int(tile_w * bh / bw)
+    ims = [label(Image.open(OUT / n).convert("RGB").crop(box).resize((tile_w, tile_h), Image.LANCZOS), t, f) for n, t in tiles]
+    rows = (len(ims) + cols - 1) // cols
+    o = Image.new("RGB", (cols * tile_w + (cols - 1) * 8, rows * tile_h + (rows - 1) * 8), "white")
+    for k, im in enumerate(ims):
+        o.paste(im, ((k % cols) * (tile_w + 8), (k // cols) * (tile_h + 8)))
+    o.save(DOCS / out, quality=86)
+
+
+def faces():
+    gallery([("baseline.png", "Original"), ("doc_foundation.png", "Foundation"), ("doc_soft_light.png", "Soft light"),
+             ("doc_vline.png", "V-shape jaw, longer chin"), ("doc_nose.png", "Slim nose"), ("doc_lips.png", "Fuller lips")],
+            FACE, 300, 3, "face.jpg")
+    gallery([("baseline.png", "Original"), ("doc_eyeshadow.png", "Eyeshadow"), ("doc_eyeliner.png", "Eyeliner"),
+             ("doc_brows.png", "Eyebrows"), ("doc_eye_color.png", "Eye colour"), ("doc_eyes_all.png", "All together")],
+            EYES, 300, 3, "eyes.jpg")
+
+
 def social(a, b):
     o = Image.new("RGB", (1280, 640), (22, 24, 30))
     a, b = a.resize((560, 560), Image.LANCZOS), b.resize((560, 560), Image.LANCZOS)
@@ -91,7 +120,7 @@ def social(a, b):
     d.text((x, 120), "Polish", font=big, fill="white")
     d.text((x, 200), "for OBS Studio", font=mid, fill=(170, 180, 200))
     y = 270
-    for line in ["Skin smoothing, makeup, face shape", "17 looks, background blur & replace", "Face-tracked stickers"]:
+    for line in ["Skin, makeup, eyes and face shape", "17 looks, background blur & replace", "Face-tracked stickers"]:
         d.text((x, y), line, font=reg, fill=(225, 228, 235))
         y += 44
     y += 20
@@ -108,5 +137,6 @@ def social(a, b):
 if __name__ == "__main__":
     a, b = demo()
     backgrounds()
+    faces()
     social(a, b)
     print("docs images written")

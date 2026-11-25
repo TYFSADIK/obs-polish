@@ -3,8 +3,9 @@
 # Polish for OBS
 
 **Free, open-source beauty and camera effects for [OBS Studio](https://obsproject.com).**<br>
-Skin smoothing, makeup, face shape, 17 colour looks, background blur or replacement and
-face-tracked stickers. Windows, macOS and Linux. No watermark, no account, nothing uploaded.
+Skin smoothing, foundation, soft light, makeup (lips, blush, eyeshadow, eyeliner, brows, eye
+colour), face shape (jaw, chin, nose, eyes, lips), 17 colour looks, background blur or
+replacement and face-tracked stickers. Windows, macOS and Linux. No watermark, no account, nothing uploaded.
 
 [![build](https://github.com/TYFSADIK/obs-polish/actions/workflows/build.yml/badge.svg)](https://github.com/TYFSADIK/obs-polish/actions/workflows/build.yml)
 [![release](https://img.shields.io/github/v/release/TYFSADIK/obs-polish)](https://github.com/TYFSADIK/obs-polish/releases/latest)
@@ -121,9 +122,9 @@ Close OBS and delete the folder:
 
 | | |
 | --- | --- |
-| **Beauty** | edge-preserving skin smoothing, only on skin inside the tracked face; brightening that keeps skin's own colour; sharpening |
-| **Makeup** | lipstick and blush in any colour, teeth whitening, eye brightening |
-| **Face shape** | slimmer jaw and bigger eyes, from 468 face landmarks |
+| **Beauty** | edge-preserving skin smoothing, only on skin inside the tracked face; brightening that keeps skin's own colour; foundation that evens tone towards a shade you pick; soft light; sharpening |
+| **Makeup** | lipstick, blush, eyeshadow, eyeliner, eyebrows and eye colour, each in any colour; teeth whitening, eye brightening |
+| **Face shape** | slim face, V-shape jaw, chin length, slim nose, bigger eyes and fuller lips, from the face landmarks |
 | **Colour** | 17 looks: Portrait (Rosy, Fresh, Porcelain), Food (Appetizing), Landscape (Lush, Sunset), Modern (Cinematic, Noir, Vintage), Warm, Cool, Golden hour, Vivid, Pastel, Teal and orange, Mono, Film; strength, exposure, warmth, saturation, vignette, film grain |
 | **Background** | blur, a solid colour (a green screen without the green screen), Studio, Gradient, Bokeh lights or Sunset backdrops, or your own image |
 | **Stickers** | sunglasses, star glasses, crown, flower crown, cat ears, bunny ears, devil horns, halo, hearts, party hat; they follow your head as it moves and tilts |
@@ -134,6 +135,8 @@ Close OBS and delete the folder:
 <tr><td><img src="docs/img/beauty.jpg" alt="Original, skin smoothing at 100, and skin brightening at 100"></td></tr>
 <tr><td align="center">Beauty at full strength (the defaults are gentler)</td></tr>
 <tr><td><img src="docs/img/makeup.jpg" alt="Original, lipstick, and lipstick with blush, teeth whitening and eye brightening"></td></tr>
+<tr><td><img src="docs/img/eyes.jpg" alt="Original eyes, then eyeshadow, eyeliner, eyebrows, eye colour, and all four together"></td></tr>
+<tr><td><img src="docs/img/face.jpg" alt="Original face, then foundation, soft light, V-shape jaw with a longer chin, slim nose and fuller lips"></td></tr>
 <tr><td align="center">Makeup: lipstick, then lipstick with blush, whiter teeth and brighter eyes</td></tr>
 <tr><td><img src="docs/img/background.jpg" alt="Background blur, solid colour, the Studio, Bokeh and Sunset backdrops, and your own image"></td></tr>
 <tr><td align="center">Background: blur, colour, three built-in backdrops, your own image</td></tr>
@@ -147,17 +150,18 @@ Close OBS and delete the folder:
 
 - **Everything runs on your computer.** No account, no internet connection, no telemetry, no
   watermark. The face models ship inside the plugin.
-- **Light on the GPU:** about 2 ms per 1080p frame with every effect on (Apple silicon Mac,
-  measured inside OBS's own engine). Effects that are switched off cost nothing.
+- **Light on the GPU:** about 3.6 ms per 1080p frame with every effect on, at once, on a
+  MacBook Air M2 with OBS's OpenGL renderer (about 7 ms with its newer Metal renderer), measured
+  inside OBS's own engine. Effects that are switched off cost nothing.
 - **Never stalls a frame.** Face analysis runs on its own thread on a small copy of the frame;
   if it is busy, that frame keeps the last result.
 
 ## How it works
 
 ```
-camera ─┬─► smooth + brighten ─► makeup ─► face shape ─► background ─► look, vignette, grain ─► sticker ─► OBS
-        │          ▲                ▲          ▲              ▲                                    ▲
-        └─► 384 px copy ─► face analysis (its own thread): 468 landmarks, lips, person mask
+camera ─┬─► smooth, brighten, foundation ─► makeup ─► face shape ─► background ─► soft light ─► look, vignette, grain ─► sticker ─► OBS
+        │               ▲                     ▲          ▲              ▲                                                ▲
+        └─► 384 px copy ─► face analysis (its own thread): landmarks, lips, eyes, brows, iris, person mask
 ```
 
 | | Windows, Linux | macOS |
@@ -171,7 +175,7 @@ in a million.
 
 ## Tested on every platform
 
-Every push builds all five packages and runs the same 14 pixel checks inside a real OBS on each
+Every push builds all five packages and runs the same 24 pixel checks inside a real OBS on each
 platform (no window; [tests/run_tests.py](tests/run_tests.py)):
 
 | Platform | OBS | Graphics |
@@ -183,8 +187,11 @@ platform (no window; [tests/run_tests.py](tests/run_tests.py)):
 
 The checks include: with every effect off the picture is unchanged to the pixel; the face is
 found; smoothing halves skin detail and leaves the background alone; brightening keeps skin's
-hue; face shape only moves pixels near the face; lipstick only touches the mouth; the background
-modes replace the background and keep the person; compare shows the original exactly.
+hue; face shape only moves pixels near the face; lipstick only touches the mouth; eyeshadow,
+eyeliner and eyebrows land above the eyes and eye colour stays inside the irises; foundation
+evens skin colour without touching the background; effects stacked together still land where
+they should; the background modes replace the background and keep the person; compare shows the
+original exactly.
 
 ## Build from source
 

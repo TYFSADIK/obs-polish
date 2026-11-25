@@ -5,6 +5,8 @@ uniform texture2d mask_tex;
 uniform texture2d bg_tex;
 uniform texture2d lut_tex;
 uniform texture2d mouth_tex;  // R: lips, G: mouth interior
+uniform texture2d eyes_tex;   // R: brows, G: eyeshadow, B: eyeliner, A: iris
+uniform texture2d glow_tex;   // a blurred copy of the frame, for soft light
 
 uniform float2 size;          // frame size in pixels
 uniform float2 texel;         // 1 / size
@@ -19,6 +21,8 @@ uniform float4 face1;
 uniform float face0_roll;
 uniform float face1_roll;
 uniform float no_face_level;  // smoothing level on skin when no face is tracked
+uniform float4 foundation;    // rgb shade, strength in a
+uniform float glow_amt;       // soft light, 0..1
 
 // face shape (pixels)
 uniform float4 ctl0;          // control point x, y and displacement x, y
@@ -27,7 +31,15 @@ uniform float4 ctl2;
 uniform float4 ctl3;
 uniform float4 ctl4;
 uniform float4 ctl5;
+uniform float4 ctl6;
+uniform float4 ctl7;
+uniform float4 ctl8;
 uniform float ctl_radius;
+uniform float4 nose_area;     // centre x, y, half width, half height (pixels)
+uniform float nose_amt;
+uniform float4 lip_area;      // centre x, y, half width, half height (pixels)
+uniform float lip_amt;
+uniform float shape_roll;     // the head's roll, radians
 uniform float4 eye0;          // centre x, y, radius, strength
 uniform float4 eye1;
 
@@ -46,6 +58,10 @@ uniform float4 cheek0;        // centre x, y (pixels), radius x, y (pixels)
 uniform float4 cheek1;
 uniform float4 eyeb0;         // centre x, y (pixels), radius (pixels), strength
 uniform float4 eyeb1;
+uniform float4 shadow_color;  // rgb, strength in a (each of these)
+uniform float4 liner_color;
+uniform float4 brow_color;
+uniform float4 iris_color;
 
 // grade
 uniform float vignette;       // 0..1
@@ -115,9 +131,10 @@ float4 PSSmooth(VertData v_in) : TARGET
 	float4 c = image.Sample(linear_clamp, v_in.uv);
 	float region = skin_prob(c.rgb) * face_weight(v_in.uv);
 	float m = smooth_amt * region;
+	float fa = foundation.a * region;
 	float3 acc = c.rgb;
 	float wsum = 1.0;
-	if (m > 0.002) {
+	if (m > 0.002 || fa > 0.002) {
 		for (int ring = 1; ring <= 3; ring++) {
 			float rr = smooth_radius * float(ring) / 3.0;
 			float ws = exp(-float(ring * ring) / 6.0);
@@ -141,6 +158,19 @@ float4 PSSmooth(VertData v_in) : TARGET
 	float lift = brighten * region * 0.35;
 	float y1 = y0 + lift * y0 * (1.0 - y0) * 1.6;
 	outc = saturate(outc * (y1 / y0));
+	// foundation: coverage, not paint. Blotches and redness are colour that differs from the skin
+	// around it, so take the colour from the edge-preserving blur (sm) and the brightness mostly
+	// from the pixel, keeping light, shade and the face's shape; then lean the colour a little
+	// towards the chosen shade and lift it slightly, as a foundation does.
+	if (fa > 0.002) {
+		float yp = luma(outc), ys = luma(sm);
+		float3 cs_ = sm - ys;                                   // the surrounding skin's colour
+		float3 shade = foundation.rgb - luma(foundation.rgb);   // the shade's colour
+		float3 col = lerp(cs_, shade * (0.6 + yp), 0.3);
+		float yn = lerp(yp, ys, 0.35) + 0.035;                  // cover small marks, a little lift
+		float3 covered = saturate(yn + col);
+		outc = lerp(outc, covered, fa * 0.85);
+	}
 	return float4(outc, c.a);
 }
 
@@ -193,6 +223,29 @@ float4 PSMakeup(VertData v_in) : TARGET
 		float b = max(soft_ellipse(pos, cheek0), soft_ellipse(pos, cheek1)) * skin_prob(c.rgb);
 		rgb = lerp(rgb, rgb * lerp(float3(1.0, 1.0, 1.0), blush_color.rgb, 0.6) * 1.06, b * blush_color.a);
 	}
+	// eye makeup, from the eye mask: eyeshadow, then brows, then liner, then the iris
+	float4 em = eyes_tex.Sample(linear_clamp, v_in.uv);
+	if (shadow_color.a > 0.0) {
+		// a wash of colour that keeps the lid's light and shade
+		float3 sh = lerp(soft_light(rgb, shadow_color.rgb), rgb * shadow_color.rgb * 1.4, 0.55);
+		sh = lerp(sh, shadow_color.rgb * (0.5 + 0.6 * luma(rgb)), 0.25); // some of the colour itself
+		rgb = lerp(rgb, saturate(sh), em.g * shadow_color.a);
+	}
+	if (brow_color.a > 0.0) {
+		// fill and define: towards the colour, darker where the hair already is
+		float3 br = brow_color.rgb * (0.55 + 0.7 * luma(rgb));
+		rgb = lerp(rgb, min(rgb, br * 1.15), em.r * brow_color.a);
+	}
+	if (liner_color.a > 0.0)
+		rgb = lerp(rgb, liner_color.rgb * (0.85 + 0.3 * luma(rgb)), em.b * liner_color.a);
+	if (iris_color.a > 0.0) {
+		// the iris takes the colour's hue at its own brightness, so its texture and the catchlight stay
+		float yi = luma(rgb);
+		float3 tint = iris_color.rgb * (yi / max(luma(iris_color.rgb), 0.05));
+		tint = lerp(tint, soft_light(rgb, iris_color.rgb), 0.35);
+		float catchlight = smoothstep(0.55, 0.8, yi); // reflections stay white, as with a real lens
+		rgb = lerp(rgb, saturate(tint), em.a * iris_color.a * (1.0 - catchlight));
+	}
 	// eye brightening: lift the whites and iris contrast inside each eye
 	if (eyeb0.w > 0.0) {
 		float e = max(soft_ellipse(pos, float4(eyeb0.xy, eyeb0.z, eyeb0.z * 0.6)),
@@ -207,9 +260,43 @@ float2 jaw_shift(float2 pos)
 {
 	float w0 = ctl_weight(pos, ctl0), w1 = ctl_weight(pos, ctl1), w2 = ctl_weight(pos, ctl2);
 	float w3 = ctl_weight(pos, ctl3), w4 = ctl_weight(pos, ctl4), w5 = ctl_weight(pos, ctl5);
-	float sum = w0 + w1 + w2 + w3 + w4 + w5;
-	float2 d = w0 * ctl0.zw + w1 * ctl1.zw + w2 * ctl2.zw + w3 * ctl3.zw + w4 * ctl4.zw + w5 * ctl5.zw;
+	float w6 = ctl_weight(pos, ctl6), w7 = ctl_weight(pos, ctl7), w8 = ctl_weight(pos, ctl8);
+	float sum = w0 + w1 + w2 + w3 + w4 + w5 + w6 + w7 + w8;
+	float2 d = w0 * ctl0.zw + w1 * ctl1.zw + w2 * ctl2.zw + w3 * ctl3.zw + w4 * ctl4.zw + w5 * ctl5.zw +
+		   w6 * ctl6.zw + w7 * ctl7.zw + w8 * ctl8.zw;
 	return pos - d / max(sum, 1.0);
+}
+
+// Position relative to an area's centre, in the head's own frame (roll removed).
+float2 to_face(float2 rel)
+{
+	float cs = cos(shape_roll), sn = sin(shape_roll);
+	return float2(cs * rel.x + sn * rel.y, -sn * rel.x + cs * rel.y);
+}
+float2 from_face(float2 f)
+{
+	float cs = cos(shape_roll), sn = sin(shape_roll);
+	return float2(cs * f.x - sn * f.y, sn * f.x + cs * f.y);
+}
+
+// Nose: sample further out across the nose, so it draws narrower; strongest at its centre line,
+// fading to nothing at the edge of the area. Monotonic for nose_amt up to 1, so nothing folds.
+float2 nose_pinch(float2 pos)
+{
+	float2 f = to_face(pos - nose_area.xy);
+	float2 q = f / nose_area.zw;
+	float t = saturate(1.0 - dot(q, q));
+	f.x *= 1.0 + nose_amt * t * t;
+	return nose_area.xy + from_face(f);
+}
+
+// Lips: a soft zoom in an ellipse around the mouth, like the eyes but wider than tall.
+float2 lip_zoom(float2 pos)
+{
+	float2 f = to_face(pos - lip_area.xy);
+	float2 q = f / lip_area.zw;
+	float t = saturate(dot(q, q));
+	return lip_area.xy + from_face(f * (1.0 - lip_amt * (1.0 - t)));
 }
 
 float2 local_zoom(float2 pos, float4 eye)
@@ -223,6 +310,10 @@ float4 PSWarp(VertData v_in) : TARGET
 {
 	float2 pos = v_in.uv * size;
 	pos = jaw_shift(pos);
+	if (nose_amt > 0.0)
+		pos = nose_pinch(pos);
+	if (lip_amt > 0.0)
+		pos = lip_zoom(pos);
 	pos = local_zoom(pos, eye0);
 	pos = local_zoom(pos, eye1);
 	return image.Sample(linear_clamp, pos * texel);
@@ -240,6 +331,22 @@ float4 PSComposite(VertData v_in) : TARGET
 	else
 		bg = bg_color.rgb;
 	return float4(lerp(bg, fg.rgb, m), fg.a);
+}
+
+// Soft light: screen a blurred copy over the frame, mostly from its brighter parts, so highlights
+// bloom and shadows open up a little; then a soft light on the face, like a large window.
+float4 PSGlow(VertData v_in) : TARGET
+{
+	float4 c = image.Sample(linear_clamp, v_in.uv);
+	float3 b = glow_tex.Sample(linear_clamp, v_in.uv).rgb;
+	float k = glow_amt * (0.12 + 0.3 * smoothstep(0.3, 0.9, luma(b)));
+	float3 rgb = 1.0 - (1.0 - c.rgb) * (1.0 - b * k);
+	rgb = lerp(rgb, rgb * 0.95 + 0.025, glow_amt * 0.35); // a touch less contrast: softer light
+	float fw_ = face_count > 0.5 ? face_weight(v_in.uv) : 0.0;
+	float y = max(luma(rgb), 1e-3);
+	float y2 = y + glow_amt * 0.08 * fw_ * (1.0 - y);
+	rgb = saturate(rgb * (y2 / y));
+	return float4(rgb, c.a);
 }
 
 float3 lut_sample(float3 c)
@@ -290,3 +397,4 @@ technique Makeup    { pass { vertex_shader = VSDefault(v_in); pixel_shader = PSM
 technique Warp      { pass { vertex_shader = VSDefault(v_in); pixel_shader = PSWarp(v_in); } }
 technique Composite { pass { vertex_shader = VSDefault(v_in); pixel_shader = PSComposite(v_in); } }
 technique Grade     { pass { vertex_shader = VSDefault(v_in); pixel_shader = PSGrade(v_in); } }
+technique Glow      { pass { vertex_shader = VSDefault(v_in); pixel_shader = PSGlow(v_in); } }

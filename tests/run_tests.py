@@ -190,8 +190,89 @@ def main():
           f"flag region changed by {flag_change:.1f} on average; face unchanged")
 
     # 12. compare shows the original
-    cmp_, _ = render("compare", {"compare": True, "smooth": 100, "look": "mono", "lipstick": 100, "vignette": 100}, frames=5)
+    cmp_, _ = render("compare", {"compare": True, "smooth": 100, "look": "mono", "lipstick": 100, "vignette": 100,
+                                 "foundation": 100, "soft_light": 100, "eyeliner": 100, "nose_slim": 100}, frames=5)
     check("compare", np.abs(cmp_ - src).max() <= NOISE, f"max difference {np.abs(cmp_ - src).max()}")
+
+    # 13. effects stacked the way people use them: each pass after the first must still know the
+    # frame size and where the face is (libobs clears effect parameters after every technique)
+    stk, _ = render("stacked", {"smooth": 45, "brighten": 20, "slim": 60, "eyes": 30, "blush": 60, "vignette": 60})
+    flat = stk.reshape(-1, 3).std(axis=0).mean()
+    corner_d = region(src, (0, 0, 80, 80)).mean() - region(stk, (0, 0, 80, 80)).mean()
+    face_d = np.abs(region(stk, face_box) - region(src, face_box)).mean()
+    check("stacked effects", flat > 20 and corner_d > 10 and 1 < face_d < 30,
+          f"picture spread {flat:.1f}, corner darker by {corner_d:.1f}, face changed by {face_d:.1f} on average")
+
+    def changed_px(img, thr=6):
+        return np.nonzero(np.abs(img - src).max(axis=2) > thr)
+
+    eye_row = (f["eye_l"][1] + f["eye_r"][1]) / 2 * H
+    chin_row = f["chin"][1] * H
+    face_w = fw * W
+
+    # 14. foundation evens skin colour on the face and leaves the background alone
+    fd, _ = render("foundation", {**OFF, "foundation": 100})
+    cheeks = (int(f["eye_l"][0] * W), int(eye_row + 0.25 * (chin_row - eye_row)), int(f["eye_r"][0] * W), int(eye_row + 0.45 * (chin_row - eye_row)))
+
+    def chroma_spread(img):
+        px = region(img, cheeks).reshape(-1, 3).astype(float)
+        return (px - px.mean(axis=1, keepdims=True)).std(axis=0).mean()
+    c0, c1 = chroma_spread(src), chroma_spread(fd)
+    bg_change = np.abs(region(fd, corner) - region(src, corner)).max()
+    check("foundation", c1 < c0 * 0.9 and bg_change == 0, f"cheek colour spread {c0:.2f} -> {c1:.2f}, background change {bg_change}")
+
+    # 15. soft light lifts the picture gently, more on the face
+    sl, _ = render("soft_light", {**OFF, "soft_light": 100})
+    lift_all = sl.mean() - src.mean()
+    lift_face = region(sl, face_box).mean() - region(src, face_box).mean()
+    check("soft light", 2 < lift_all < 35 and lift_face > lift_all * 0.8, f"brightness +{lift_all:.1f} overall, +{lift_face:.1f} on the face")
+
+    # 16. V-shape jaw and a longer chin move the lower face only
+    vl, _ = render("vline_chin", {**OFF, "vline": 100, "chin": 50})
+    ys, xs = changed_px(vl)
+    check("v-shape and chin", len(ys) > 200 and np.median(ys) > eye_row and ys.min() > eye_row - 0.1 * fh * H
+          and np.abs(xs - (face_box[0] + face_box[2]) / 2).max() < face_w,
+          f"{len(ys)} pixels, rows {ys.min() if len(ys) else 0}-{ys.max() if len(ys) else 0} (eyes {eye_row:.0f}, chin {chin_row:.0f})")
+
+    # 17. slim nose changes the middle of the face, between the eyes and the mouth
+    no, info = render("nose", {**OFF, "nose_slim": 100})
+    ys, xs = changed_px(no)
+    nose_x = (info["nose"][0][0] + info["nose"][1][0]) / 2 * W
+    check("slim nose", len(ys) > 30 and eye_row - 0.05 * fh * H < np.median(ys) < chin_row and abs(np.median(xs) - nose_x) < 0.15 * face_w,
+          f"{len(ys)} pixels around ({np.median(xs) if len(xs) else 0:.0f}, {np.median(ys) if len(ys) else 0:.0f}), nose at x {nose_x:.0f}")
+
+    # 18. fuller lips change pixels around the mouth only
+    lf, _ = render("lip_fill", {**OFF, "lip_fill": 100})
+    ys, xs = changed_px(lf)
+    check("fuller lips", len(ys) > 30 and abs(np.median(ys) - mouth_y) < 0.25 * fh * H and ys.min() > eye_row,
+          f"{len(ys)} pixels around row {np.median(ys) if len(ys) else 0:.0f} (mouth about {mouth_y:.0f})")
+
+    # 19. eye makeup: shadow above the eyes, liner darker at the lash line, brows darker above,
+    # iris colour inside the iris
+    es, info = render("eyeshadow", {**OFF, "eyeshadow": 100, "eyeshadow_color": 0xFFC8508C})  # ABGR violet
+    ys, xs = changed_px(es)
+    check("eyeshadow", info["eyes"][0] > 0 and len(ys) > 40 and np.median(ys) < eye_row and np.median(ys) > eye_row - 0.3 * fh * H,
+          f"eye mask {info['eyes']}, {len(ys)} pixels, median row {np.median(ys) if len(ys) else 0:.0f} (eyes {eye_row:.0f})")
+    el, _ = render("eyeliner", {**OFF, "eyeliner": 100})
+    ys, xs = changed_px(el)
+    darker = (src[ys, xs].mean() - el[ys, xs].mean()) if len(ys) else 0
+    check("eyeliner", len(ys) > 30 and abs(np.median(ys) - eye_row) < 0.12 * fh * H and darker > 8,
+          f"{len(ys)} pixels around row {np.median(ys) if len(ys) else 0:.0f} (eyes {eye_row:.0f}), darker by {darker:.1f}")
+    bw, info = render("brows", {**OFF, "brows": 100})
+    ys, xs = changed_px(bw)
+    darker = (src[ys, xs].mean() - bw[ys, xs].mean()) if len(ys) else 0
+    check("eyebrows", info.get("brows", 0) > 0 and len(ys) > 40 and np.median(ys) < eye_row and darker > 5,
+          f"{len(ys)} pixels, median row {np.median(ys) if len(ys) else 0:.0f} (eyes {eye_row:.0f}), darker by {darker:.1f}")
+    ec, info = render("eye_colour", {**OFF, "eye_color": 100, "iris_color": 0xFF30B040})  # ABGR green
+    ys, xs = changed_px(ec)  # 6 levels, like every other check: emulated GPUs round a few levels off
+    ok_inside = True
+    for x, y in zip(xs, ys):
+        if min(np.hypot(x - ix * W, y - iy * H) - 1.6 * ir * W for ix, iy, ir in info["iris"]) > 2:
+            ok_inside = False
+            break
+    greener = (ec[ys, xs, 1] - ec[ys, xs, 2]).mean() - (src[ys, xs, 1] - src[ys, xs, 2]).mean() if len(ys) else 0
+    check("eye colour", len(ys) > 10 and ok_inside and greener > 3,
+          f"{len(ys)} pixels, all inside the irises: {ok_inside}, green-blue +{greener:.1f}")
 
     failed = [n for n, ok, _ in results if not ok]
     print(f"\n{len(results) - len(failed)} of {len(results)} passed")

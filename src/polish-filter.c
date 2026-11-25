@@ -1,7 +1,8 @@
 /* Polish for OBS: the video filter.
  *
  * Each frame: capture the source, then run enabled passes on the GPU:
- *   smooth + brighten -> makeup -> face shape warp -> background -> grade (look, tone, vignette, grain) -> sticker
+ *   smooth, brighten, foundation -> makeup (lips, teeth, blush, eyes, brows) -> face shape warp
+ *   -> background -> soft light -> grade (look, tone, vignette, grain) -> sticker
  * A small copy of the frame goes to the Vision analyzer in the background (face landmarks,
  * person mask); the passes use its latest result, so analysis never blocks rendering.
  * Original work; MIT licence. */
@@ -21,6 +22,7 @@ extern volatile bool polish_compare_held;
 #define MASK_CAP (1024 * 1024)
 #define BLUR_LEVELS 6
 #define MOUTH_CAP (ANALYSIS_W * 1024 * 2)
+#define EYES_CAP (ANALYSIS_W * 1024 * 4)
 
 enum bg_mode { BG_OFF, BG_BLUR, BG_IMAGE, BG_COLOR };
 
@@ -49,11 +51,17 @@ struct polish {
 	gs_texture_t *mouth_tex;
 	uint64_t mouth_seq_uploaded;
 	int mouth_w, mouth_h;
+	uint8_t *eyes_buf;
+	gs_texture_t *eyes_tex;
+	uint64_t eyes_seq_uploaded;
+	int eyes_w, eyes_h;
 	uint64_t frame;
 
 	float smooth, brighten, sharpen, slim, eyes;
+	float foundation, soft_light, vline, chin, nose_slim, lip_fill;
 	float lipstick, blush, teeth, eye_bright;
-	uint32_t lip_color, blush_color;
+	float eyeshadow, eyeliner, brows, eye_color;
+	uint32_t lip_color, blush_color, foundation_color, shadow_color, liner_color, brow_color, iris_color;
 	float vignette, grain;
 	char bg_preset[32];
 	char look[32];
@@ -91,6 +99,21 @@ static void pf_update(void *data, obs_data_t *s)
 	p->blush_color = (uint32_t)obs_data_get_int(s, "blush_color");
 	p->teeth = pct(s, "teeth");
 	p->eye_bright = pct(s, "eye_bright");
+	p->foundation = pct(s, "foundation");
+	p->foundation_color = (uint32_t)obs_data_get_int(s, "foundation_color");
+	p->soft_light = pct(s, "soft_light");
+	p->vline = pct(s, "vline");
+	p->chin = pct(s, "chin");
+	p->nose_slim = pct(s, "nose_slim");
+	p->lip_fill = pct(s, "lip_fill");
+	p->eyeshadow = pct(s, "eyeshadow");
+	p->shadow_color = (uint32_t)obs_data_get_int(s, "eyeshadow_color");
+	p->eyeliner = pct(s, "eyeliner");
+	p->liner_color = (uint32_t)obs_data_get_int(s, "eyeliner_color");
+	p->brows = pct(s, "brows");
+	p->brow_color = (uint32_t)obs_data_get_int(s, "brow_color");
+	p->eye_color = pct(s, "eye_color");
+	p->iris_color = (uint32_t)obs_data_get_int(s, "iris_color");
 	p->vignette = pct(s, "vignette");
 	p->grain = pct(s, "grain");
 	snprintf(p->bg_preset, sizeof p->bg_preset, "%s", obs_data_get_string(s, "bg_preset"));
@@ -120,6 +143,11 @@ static void pf_defaults(obs_data_t *s)
 	obs_data_set_default_int(s, "eyes", 0);
 	obs_data_set_default_int(s, "lip_color", 0xFF5A3CC8);   /* ABGR: a rose red */
 	obs_data_set_default_int(s, "blush_color", 0xFF8C78F0); /* ABGR: a soft pink */
+	obs_data_set_default_int(s, "foundation_color", 0xFFA0BEE6); /* ABGR: a warm beige */
+	obs_data_set_default_int(s, "eyeshadow_color", 0xFF6E5F96);  /* ABGR: a mauve brown */
+	obs_data_set_default_int(s, "eyeliner_color", 0xFF141419);   /* ABGR: soft black */
+	obs_data_set_default_int(s, "brow_color", 0xFF283246);       /* ABGR: dark brown */
+	obs_data_set_default_int(s, "iris_color", 0xFFAA8246);       /* ABGR: blue-green */
 	obs_data_set_default_string(s, "bg_preset", "studio");
 	obs_data_set_default_string(s, "look", "none");
 	obs_data_set_default_int(s, "look_strength", 80);
@@ -173,11 +201,18 @@ static obs_properties_t *pf_properties(void *data)
 	obs_properties_add_int_slider(g, "smooth", obs_module_text("Smooth"), 0, 100, 1);
 	obs_properties_add_int_slider(g, "brighten", obs_module_text("Brighten"), 0, 100, 1);
 	obs_properties_add_int_slider(g, "sharpen", obs_module_text("Sharpen"), 0, 100, 1);
+	obs_properties_add_int_slider(g, "foundation", obs_module_text("Foundation"), 0, 100, 1);
+	obs_properties_add_color(g, "foundation_color", obs_module_text("FoundationColor"));
+	obs_properties_add_int_slider(g, "soft_light", obs_module_text("SoftLight"), 0, 100, 1);
 	obs_properties_add_group(pr, "g_beauty", obs_module_text("Beauty"), OBS_GROUP_NORMAL, g);
 
 	g = obs_properties_create();
 	obs_properties_add_int_slider(g, "slim", obs_module_text("Slim"), 0, 100, 1);
+	obs_properties_add_int_slider(g, "vline", obs_module_text("VLine"), 0, 100, 1);
+	obs_properties_add_int_slider(g, "chin", obs_module_text("Chin"), -50, 50, 1);
+	obs_properties_add_int_slider(g, "nose_slim", obs_module_text("NoseSlim"), 0, 100, 1);
 	obs_properties_add_int_slider(g, "eyes", obs_module_text("Eyes"), 0, 100, 1);
+	obs_properties_add_int_slider(g, "lip_fill", obs_module_text("LipFill"), 0, 100, 1);
 	obs_properties_add_group(pr, "g_shape", obs_module_text("Shape"), OBS_GROUP_NORMAL, g);
 
 	g = obs_properties_create();
@@ -185,6 +220,14 @@ static obs_properties_t *pf_properties(void *data)
 	obs_properties_add_color(g, "lip_color", obs_module_text("LipColor"));
 	obs_properties_add_int_slider(g, "blush", obs_module_text("Blush"), 0, 100, 1);
 	obs_properties_add_color(g, "blush_color", obs_module_text("BlushColor"));
+	obs_properties_add_int_slider(g, "eyeshadow", obs_module_text("Eyeshadow"), 0, 100, 1);
+	obs_properties_add_color(g, "eyeshadow_color", obs_module_text("EyeshadowColor"));
+	obs_properties_add_int_slider(g, "eyeliner", obs_module_text("Eyeliner"), 0, 100, 1);
+	obs_properties_add_color(g, "eyeliner_color", obs_module_text("EyelinerColor"));
+	obs_properties_add_int_slider(g, "brows", obs_module_text("Brows"), 0, 100, 1);
+	obs_properties_add_color(g, "brow_color", obs_module_text("BrowColor"));
+	obs_properties_add_int_slider(g, "eye_color", obs_module_text("EyeColor"), 0, 100, 1);
+	obs_properties_add_color(g, "iris_color", obs_module_text("IrisColor"));
 	obs_properties_add_int_slider(g, "teeth", obs_module_text("Teeth"), 0, 100, 1);
 	obs_properties_add_int_slider(g, "eye_bright", obs_module_text("EyeBright"), 0, 100, 1);
 	obs_properties_add_group(pr, "g_makeup", obs_module_text("Makeup"), OBS_GROUP_NORMAL, g);
@@ -337,6 +380,7 @@ static void *pf_create(obs_data_t *s, obs_source_t *src)
 	p->analyzer = pa_create();
 	p->mask = bmalloc(MASK_CAP);
 	p->mouth = bmalloc(MOUTH_CAP);
+	p->eyes_buf = bmalloc(EYES_CAP);
 	proc_handler_add(obs_source_get_proc_handler(src), "void analysis_json(out string json)", analysis_json, p);
 	pf_update(p, s);
 	return p;
@@ -359,12 +403,14 @@ static void pf_destroy(void *data)
 	gs_stagesurface_destroy(p->stage);
 	gs_texture_destroy(p->mask_tex);
 	gs_texture_destroy(p->mouth_tex);
+	gs_texture_destroy(p->eyes_tex);
 	obs_leave_graphics();
 	polish_image_free(&p->lut_img);
 	polish_image_free(&p->bg_img);
 	polish_image_free(&p->sticker_img);
 	bfree(p->mask);
 	bfree(p->mouth);
+	bfree(p->eyes_buf);
 	bfree(p->bg_path);
 	bfree(p->loaded_bg);
 	bfree(p);
@@ -426,7 +472,8 @@ static void analyse(struct polish *p, gs_texture_t *src, uint32_t w, uint32_t h)
 		uint32_t ls;
 		if (gs_stagesurface_map(p->stage, &data, &ls)) {
 			int want = (p->bg_mode != BG_OFF ? PA_WANT_PERSON : 0) |
-				   (p->lipstick > 0 || p->teeth > 0 ? PA_WANT_MOUTH : 0);
+				   (p->lipstick > 0 || p->teeth > 0 ? PA_WANT_MOUTH : 0) |
+				   (p->eyeshadow > 0 || p->eyeliner > 0 || p->brows > 0 || p->eye_color > 0 ? PA_WANT_EYES : 0);
 			pa_submit(p->analyzer, data, (int)sw, (int)sh, (int)ls, want);
 			gs_stagesurface_unmap(p->stage);
 		}
@@ -464,6 +511,20 @@ static void upload_mouth(struct polish *p)
 	p->mouth_seq_uploaded = p->res.mouth_seq;
 }
 
+static void upload_eyes(struct polish *p)
+{
+	if (p->res.eyes_w <= 0 || p->res.eyes_seq == p->eyes_seq_uploaded)
+		return;
+	if (!p->eyes_tex || p->eyes_w != p->res.eyes_w || p->eyes_h != p->res.eyes_h) {
+		gs_texture_destroy(p->eyes_tex);
+		p->eyes_tex = gs_texture_create(p->res.eyes_w, p->res.eyes_h, GS_RGBA, 1, NULL, GS_DYNAMIC);
+		p->eyes_w = p->res.eyes_w;
+		p->eyes_h = p->res.eyes_h;
+	}
+	gs_texture_set_image(p->eyes_tex, p->eyes_buf, p->eyes_w * 4, false);
+	p->eyes_seq_uploaded = p->res.eyes_seq;
+}
+
 static void color_v4(gs_effect_t *fx, const char *n, uint32_t c, float a)
 {
 	set_v4(fx, n, (float)(c & 0xFF) / 255.0f, (float)((c >> 8) & 0xFF) / 255.0f, (float)((c >> 16) & 0xFF) / 255.0f, a);
@@ -477,6 +538,25 @@ static void face_ellipse(const struct pa_face *f, float out[4])
 	out[1] = ey + (f->chin.y - ey) * 0.20f;
 	out[2] = f->w * 0.62f;
 	out[3] = f->h * 0.68f;
+}
+
+/* libobs clears every effect parameter when a technique ends, so values a pass reads must be set
+ * before that pass, every time. These are the ones several passes share. */
+struct pass_common {
+	float fw, fh;
+	float e0[4], e1[4], roll0, roll1;
+	int nfaces;
+};
+
+static void pass_common(gs_effect_t *fx, const struct pass_common *c)
+{
+	set_v2(fx, "size", c->fw, c->fh);
+	set_v2(fx, "texel", 1.0f / c->fw, 1.0f / c->fh);
+	set_f(fx, "face_count", (float)c->nfaces);
+	set_v4(fx, "face0", c->e0[0], c->e0[1], c->e0[2], c->e0[3]);
+	set_v4(fx, "face1", c->e1[0], c->e1[1], c->e1[2], c->e1[3]);
+	set_f(fx, "face0_roll", c->roll0);
+	set_f(fx, "face1_roll", c->roll1);
 }
 
 #define SWAP_PASS()                    \
@@ -502,8 +582,10 @@ static void pf_render(void *data, gs_effect_t *unused)
 
 	/* Nothing to do (every effect off, or compare held): step aside, so the picture is exactly
 	 * what OBS would show without the filter, at no cost. */
-	bool any = p->smooth > 0 || p->brighten > 0 || p->sharpen > 0 || p->slim > 0 || p->eyes > 0 ||
-		   p->lipstick > 0 || p->blush > 0 || p->teeth > 0 || p->eye_bright > 0 || p->bg_mode != BG_OFF ||
+	bool eye_makeup = p->eyeshadow > 0 || p->eyeliner > 0 || p->brows > 0 || p->eye_color > 0;
+	bool shape = p->slim > 0 || p->eyes > 0 || p->vline > 0 || p->chin != 0 || p->nose_slim > 0 || p->lip_fill > 0;
+	bool any = p->smooth > 0 || p->brighten > 0 || p->sharpen > 0 || shape || p->foundation > 0 || p->soft_light > 0 ||
+		   eye_makeup || p->lipstick > 0 || p->blush > 0 || p->teeth > 0 || p->eye_bright > 0 || p->bg_mode != BG_OFF ||
 		   (p->lut_loaded && p->look_amt > 0) || p->exposure != 0 || p->warmth != 0 || p->saturation != 0 ||
 		   p->vignette > 0 || p->grain > 0 || strcmp(p->sticker, "none") != 0;
 	if (!any || p->compare || polish_compare_held) {
@@ -532,15 +614,16 @@ static void pf_render(void *data, gs_effect_t *unused)
 	float fw = (float)w, fh = (float)h, aspect = fw / fh;
 
 	/* 2. analysis */
-	bool makeup = p->lipstick > 0 || p->blush > 0 || p->teeth > 0 || p->eye_bright > 0;
-	bool need_faces = p->smooth > 0 || p->brighten > 0 || p->slim > 0 || p->eyes > 0 || makeup ||
+	bool makeup = p->lipstick > 0 || p->blush > 0 || p->teeth > 0 || p->eye_bright > 0 || eye_makeup;
+	bool need_faces = p->smooth > 0 || p->brighten > 0 || p->foundation > 0 || p->soft_light > 0 || shape || makeup ||
 			  strcmp(p->sticker, "none") != 0;
 	p->frame++;
 	if (need_faces || p->bg_mode != BG_OFF)
 		analyse(p, src, w, h);
-	pa_get(p->analyzer, &p->res, p->mask, MASK_CAP, p->mouth, MOUTH_CAP);
+	pa_get(p->analyzer, &p->res, p->mask, MASK_CAP, p->mouth, MOUTH_CAP, p->eyes_buf, EYES_CAP);
 	upload_mask(p);
 	upload_mouth(p);
+	upload_eyes(p);
 	const struct pa_result *r = &p->res;
 
 	gs_texrender_t *ping = p->t_a, *pong = p->t_b;
@@ -548,26 +631,26 @@ static void pf_render(void *data, gs_effect_t *unused)
 	if (compare)
 		goto output;
 
-	set_v2(fx, "size", fw, fh);
-	set_v2(fx, "texel", 1.0f / fw, 1.0f / fh);
+	/* frame size and face regions, set again before each pass */
+	struct pass_common pc = {.fw = fw, .fh = fh, .nfaces = r->nfaces};
+	if (r->nfaces > 0) {
+		face_ellipse(&r->faces[0], pc.e0);
+		pc.roll0 = r->faces[0].roll;
+	}
+	if (r->nfaces > 1) {
+		face_ellipse(&r->faces[1], pc.e1);
+		pc.roll1 = r->faces[1].roll;
+	}
 
-	/* 3. smooth + brighten */
-	if (p->smooth > 0 || p->brighten > 0) {
-		float e0[4] = {0}, e1[4] = {0};
-		if (r->nfaces > 0)
-			face_ellipse(&r->faces[0], e0);
-		if (r->nfaces > 1)
-			face_ellipse(&r->faces[1], e1);
+	/* 3. smooth, brighten, foundation */
+	if (p->smooth > 0 || p->brighten > 0 || p->foundation > 0) {
 		set_f(fx, "smooth_amt", p->smooth);
 		set_f(fx, "smooth_radius", fmaxf(2.0f, fh * 0.0085f));
 		set_f(fx, "brighten", p->brighten);
-		set_f(fx, "face_count", (float)r->nfaces);
-		set_v4(fx, "face0", e0[0], e0[1], e0[2], e0[3]);
-		set_v4(fx, "face1", e1[0], e1[1], e1[2], e1[3]);
-		set_f(fx, "face0_roll", r->nfaces > 0 ? r->faces[0].roll : 0.0f);
-		set_f(fx, "face1_roll", r->nfaces > 1 ? r->faces[1].roll : 0.0f);
+		color_v4(fx, "foundation", p->foundation_color, p->foundation);
 		/* until the first analysis arrives, smooth skin everywhere at a lower level */
 		set_f(fx, "no_face_level", r->seq > 0 ? 0.0f : 0.6f);
+		pass_common(fx, &pc);
 		draw_into(ping, w, h, fx, "Smooth", cur);
 		cur = gs_texrender_get_texture(ping);
 		SWAP_PASS();
@@ -583,6 +666,13 @@ static void pf_render(void *data, gs_effect_t *unused)
 		else
 			gs_effect_set_texture(gs_effect_get_param_by_name(fx, "mouth_tex"), cur); /* unused: amounts are 0 */
 		color_v4(fx, "blush_color", p->blush_color, p->blush * 0.55f);
+		bool eyes_ok = p->eyes_tex && r->eyes_w > 0;
+		color_v4(fx, "shadow_color", p->shadow_color, eyes_ok ? p->eyeshadow * 0.85f : 0.0f);
+		color_v4(fx, "liner_color", p->liner_color, eyes_ok ? p->eyeliner * 0.9f : 0.0f);
+		color_v4(fx, "brow_color", p->brow_color, eyes_ok ? p->brows * 0.7f : 0.0f);
+		color_v4(fx, "iris_color", p->iris_color, eyes_ok ? p->eye_color * 0.85f : 0.0f);
+		/* always bind something: Metal stops on an unbound texture (the amounts are 0 without one) */
+		gs_effect_set_texture(gs_effect_get_param_by_name(fx, "eyes_tex"), eyes_ok ? p->eyes_tex : cur);
 		const char *cheeks[2] = {"cheek0", "cheek1"}, *eyesb[2] = {"eyeb0", "eyeb1"};
 		const struct pa_face *f = &r->faces[0];
 		float facew = f->w * fw;
@@ -595,29 +685,70 @@ static void pf_render(void *data, gs_effect_t *unused)
 			float er = (i ? f->eye_rr : f->eye_rl) * fw * 1.7f;
 			set_v4(fx, eyesb[i], eye.x * fw, eye.y * fh, fmaxf(er, 3.0f), p->eye_bright * 0.8f);
 		}
+		pass_common(fx, &pc);
 		draw_into(ping, w, h, fx, "Makeup", cur);
 		cur = gs_texrender_get_texture(ping);
 		SWAP_PASS();
 	}
 
-	/* 4. face shape (largest face) */
-	if ((p->slim > 0 || p->eyes > 0) && r->nfaces > 0) {
+	/* 4. face shape (largest face): jaw, chin, nose, eyes and lips */
+	if (shape && r->nfaces > 0) {
 		const struct pa_face *f = &r->faces[0];
 		float cx = (f->eye_l.x + f->eye_r.x) * 0.5f * fw, cy = f->nose.y * fh;
-		float facew = f->w * fw;
-		const int idx[6] = {2, 4, 6, 10, 12, 14}; /* jaw points, cheek to cheek, chin excluded */
-		const char *names[6] = {"ctl0", "ctl1", "ctl2", "ctl3", "ctl4", "ctl5"};
-		for (int i = 0; i < 6; i++) {
-			float px = f->contour[idx[i]].x * fw, py = f->contour[idx[i]].y * fh;
-			float dx = cx - px, dy = (cy - py) * 0.2f; /* mostly sideways: narrow the jaw, don't lift it */
-			float len = sqrtf(dx * dx + dy * dy) + 1e-3f;
-			float amt = p->slim * facew * 0.05f;
-			set_v4(fx, names[i], px, py, dx / len * amt, dy / len * amt);
+		float facew = f->w * fw, faceh = f->h * fh;
+		float cs = cosf(f->roll), sn = sinf(f->roll);
+		float downx = -sn, downy = cs; /* the face's down, rotated with the head */
+		/* jaw points cheek to cheek, through the chin (contour index 8) */
+		const int idx[9] = {2, 4, 6, 7, 8, 9, 10, 12, 14};
+		const char *names[9] = {"ctl0", "ctl1", "ctl2", "ctl3", "ctl4", "ctl5", "ctl6", "ctl7", "ctl8"};
+		float chinx = f->chin.x * fw;
+		for (int i = 0; i < 9; i++) {
+			int k = idx[i];
+			float px = f->contour[k].x * fw, py = f->contour[k].y * fh;
+			float dxs = 0, dys = 0;
+			if (k != 7 && k != 8 && k != 9) { /* slim: mostly sideways, narrow the jaw without lifting it */
+				float dx = cx - px, dy = (cy - py) * 0.2f, len = sqrtf(dx * dx + dy * dy) + 1e-3f, amt = p->slim * facew * 0.05f;
+				dxs += dx / len * amt;
+				dys += dy / len * amt;
+			}
+			if (k >= 6 && k <= 10 && k != 8) { /* V-shape: the lower jaw in towards the chin, and up a little */
+				float side = chinx > px ? 1.0f : -1.0f, amt = p->vline * facew * (k == 7 || k == 9 ? 0.035f : 0.045f);
+				dxs += side * amt * cs - downx * amt * 0.3f;
+				dys += side * amt * sn - downy * amt * 0.3f;
+			}
+			if (k >= 7 && k <= 9) { /* chin: longer or shorter along the face */
+				float amt = p->chin * faceh * 0.12f * (k == 8 ? 1.0f : 0.55f);
+				dxs += downx * amt;
+				dys += downy * amt;
+			}
+			set_v4(fx, names[i], px, py, dxs, dys);
 		}
 		set_f(fx, "ctl_radius", facew * 0.32f);
 		float s = p->eyes * 0.28f;
 		set_v4(fx, "eye0", f->eye_l.x * fw, f->eye_l.y * fh, fmaxf(f->eye_rl * fw * 2.4f, 4.0f), s);
 		set_v4(fx, "eye1", f->eye_r.x * fw, f->eye_r.y * fh, fmaxf(f->eye_rr * fw * 2.4f, 4.0f), s);
+		/* nose: narrow the wings towards the nose's centre line */
+		float nlx = f->nose_l.x * fw, nly = f->nose_l.y * fh, nrx = f->nose_r.x * fw, nry = f->nose_r.y * fh;
+		float nwidth = hypotf(nrx - nlx, nry - nly);
+		float ntx = f->nose_top.x * fw, nty = f->nose_top.y * fh, nbx = f->nose.x * fw, nby = f->nose.y * fh;
+		float nlen = hypotf(nbx - ntx, nby - nty);
+		set_v4(fx, "nose_area", (nlx + nrx) * 0.5f * 0.6f + (ntx + (nbx - ntx) * 0.7f) * 0.4f,
+		       (nly + nry) * 0.5f * 0.6f + (nty + (nby - nty) * 0.7f) * 0.4f, fmaxf(nwidth * 1.05f, 4.0f), fmaxf(nlen * 0.75f, 4.0f));
+		set_f(fx, "nose_amt", p->nose_slim * 0.55f);
+		/* lips: a gentle zoom on the mouth, wider than tall */
+		float lx0 = 1e9f, lx1 = -1e9f, ly0 = 1e9f, ly1 = -1e9f;
+		for (int i = 0; i < f->nlip_outer; i++) {
+			lx0 = fminf(lx0, f->lip_outer[i].x * fw);
+			lx1 = fmaxf(lx1, f->lip_outer[i].x * fw);
+			ly0 = fminf(ly0, f->lip_outer[i].y * fh);
+			ly1 = fmaxf(ly1, f->lip_outer[i].y * fh);
+		}
+		bool lips = f->nlip_outer > 0 && p->lip_fill > 0;
+		set_v4(fx, "lip_area", lips ? (lx0 + lx1) * 0.5f : 0.0f, lips ? (ly0 + ly1) * 0.5f : 0.0f,
+		       lips ? fmaxf((lx1 - lx0) * 0.5f * 1.35f, 4.0f) : 4.0f, lips ? fmaxf((ly1 - ly0) * 0.5f * 2.0f, 4.0f) : 4.0f);
+		set_f(fx, "lip_amt", lips ? p->lip_fill * 0.22f : 0.0f);
+		set_f(fx, "shape_roll", f->roll);
+		pass_common(fx, &pc);
 		draw_into(ping, w, h, fx, "Warp", cur);
 		cur = gs_texrender_get_texture(ping);
 		SWAP_PASS();
@@ -667,10 +798,37 @@ static void pf_render(void *data, gs_effect_t *unused)
 			set_f(fx, "edge_hi", 0.5f + soft * 0.5f);
 			gs_effect_set_texture(gs_effect_get_param_by_name(fx, "mask_tex"), p->mask_tex);
 			gs_effect_set_texture(gs_effect_get_param_by_name(fx, "bg_tex"), bg ? bg : cur);
+			pass_common(fx, &pc);
 			draw_into(ping, w, h, fx, "Composite", cur);
 			cur = gs_texrender_get_texture(ping);
 			SWAP_PASS();
 		}
+	}
+
+	/* 5b. soft light: a glow from a blurred copy, and a gentle light on the face */
+	if (p->soft_light > 0) {
+		gs_effect_t *def = obs_get_base_effect(OBS_EFFECT_DEFAULT);
+		const int levels = 4;
+		uint32_t lw = w, lh = h;
+		gs_texture_t *b = cur;
+		for (int i = 0; i < levels; i++) {
+			lw = lw / 2 ? lw / 2 : 1;
+			lh = lh / 2 ? lh / 2 : 1;
+			draw_into(p->t_down[i], lw, lh, def, "Draw", b);
+			b = gs_texrender_get_texture(p->t_down[i]);
+		}
+		for (int i = levels - 1; i >= 2; i--) {
+			lw = w >> i ? w >> i : 1;
+			lh = h >> i ? h >> i : 1;
+			draw_into(p->t_up[i], lw, lh, def, "Draw", b);
+			b = gs_texrender_get_texture(p->t_up[i]);
+		}
+		set_f(fx, "glow_amt", p->soft_light);
+		gs_effect_set_texture(gs_effect_get_param_by_name(fx, "glow_tex"), b);
+		pass_common(fx, &pc);
+		draw_into(ping, w, h, fx, "Glow", cur);
+		cur = gs_texrender_get_texture(ping);
+		SWAP_PASS();
 	}
 
 	/* 6. grade */
@@ -687,6 +845,7 @@ static void pf_render(void *data, gs_effect_t *unused)
 		set_f(fx, "warmth", p->warmth);
 		set_f(fx, "saturation", p->saturation);
 		set_f(fx, "sharpen", p->sharpen);
+		pass_common(fx, &pc);
 		draw_into(ping, w, h, fx, "Grade", cur);
 		cur = gs_texrender_get_texture(ping);
 		SWAP_PASS();
@@ -755,8 +914,9 @@ static void analysis_json(void *data, calldata_t *cd)
 	struct pa_result r = p->res;
 	struct dstr s = {0};
 	const char *err = pa_error(p->analyzer);
-	dstr_printf(&s, "{\"backend\":\"%s\",\"error\":\"%s\",\"seq\":%llu,\"faces\":%d,\"face_ms\":%.1f,\"mask_ms\":%.1f,\"mask\":[%d,%d],\"mouth\":[%d,%d],\"face\":[",
-		    pa_backend_name(), err ? err : "", (unsigned long long)r.seq, r.nfaces, r.face_ms, r.mask_ms, r.mask_w, r.mask_h, r.mouth_w, r.mouth_h);
+	dstr_printf(&s, "{\"backend\":\"%s\",\"error\":\"%s\",\"seq\":%llu,\"faces\":%d,\"face_ms\":%.1f,\"mask_ms\":%.1f,\"mask\":[%d,%d],\"mouth\":[%d,%d],\"eyes\":[%d,%d],\"face\":[",
+		    pa_backend_name(), err ? err : "", (unsigned long long)r.seq, r.nfaces, r.face_ms, r.mask_ms, r.mask_w, r.mask_h, r.mouth_w, r.mouth_h,
+		    r.eyes_w, r.eyes_h);
 	for (int i = 0; i < r.nfaces; i++) {
 		const struct pa_face *f = &r.faces[i];
 		dstr_catf(&s,
@@ -767,7 +927,19 @@ static void analysis_json(void *data, calldata_t *cd)
 	dstr_cat(&s, "],\"contour\":[");
 	for (int i = 0; r.nfaces > 0 && i < r.faces[0].ncontour; i++)
 		dstr_catf(&s, "%s[%.4f,%.4f]", i ? "," : "", r.faces[0].contour[i].x, r.faces[0].contour[i].y);
-	dstr_cat(&s, "]}");
+	dstr_cat(&s, "]");
+	if (r.nfaces > 0) {
+		const struct pa_face *f = &r.faces[0];
+		dstr_catf(&s, ",\"iris\":[[%.4f,%.4f,%.4f],[%.4f,%.4f,%.4f]],\"nose\":[[%.4f,%.4f],[%.4f,%.4f],[%.4f,%.4f]],\"brows\":%d,\"eye_outline\":%d",
+			  f->iris[0].x, f->iris[0].y, f->iris_r[0], f->iris[1].x, f->iris[1].y, f->iris_r[1], f->nose_l.x, f->nose_l.y,
+			  f->nose_r.x, f->nose_r.y, f->nose_top.x, f->nose_top.y, f->nbrow, f->neye);
+		dstr_cat(&s, ",\"brow\":[");
+		for (int e = 0; e < 2 && f->nbrow; e++)
+			for (int i = 0; i < f->nbrow; i++)
+				dstr_catf(&s, "%s[%.4f,%.4f]", e || i ? "," : "", f->brow_line[e][i].x, f->brow_line[e][i].y);
+		dstr_cat(&s, "]");
+	}
+	dstr_cat(&s, "}");
 	calldata_set_string(cd, "json", s.array);
 	dstr_free(&s);
 }

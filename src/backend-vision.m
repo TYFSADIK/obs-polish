@@ -74,6 +74,20 @@ static void lip_polygon(VNFaceLandmarkRegion2D *r, int w, int h, pa_pt *out, int
 	*n = PA_LIP_PTS;
 }
 
+/* A closed outline resampled to n points evenly spaced around it. */
+static int loop(VNFaceLandmarkRegion2D *r, int w, int h, pa_pt *out, int n)
+{
+	pa_pt raw[65], ring[PA_EYE_PTS + 1];
+	int k;
+	region(r, w, h, raw, 64, &k);
+	if (k < 3 || n > PA_EYE_PTS)
+		return 0;
+	raw[k] = raw[0];
+	pa_resample(raw, k + 1, ring, n + 1);
+	memcpy(out, ring, sizeof(pa_pt) * n);
+	return n;
+}
+
 bool pa_backend_run(void *b, const uint8_t *bgra, int w, int h, int stride, int want, struct pa_backend_out *out)
 {
 	PAVision *v = (__bridge PAVision *)b;
@@ -130,7 +144,47 @@ bool pa_backend_run(void *b, const uint8_t *bgra, int w, int h, int stride, int 
 			f->nose = n ? raw[n - 1] : (pa_pt){f->x + f->w / 2, f->y + f->h * 0.6f};
 			lip_polygon(lm.outerLips, w, h, f->lip_outer, &f->nlip_outer);
 			lip_polygon(lm.innerLips, w, h, f->lip_inner, &f->nlip_inner);
+			/* nose: wings are the outline's extremes across the face, the bridge the crest's top */
+			region(lm.nose, w, h, raw, 64, &n);
+			if (n >= 2) {
+				int lo = 0, hi = 0;
+				for (int i = 1; i < n; i++) {
+					if (raw[i].x < raw[lo].x)
+						lo = i;
+					if (raw[i].x > raw[hi].x)
+						hi = i;
+				}
+				f->nose_l = raw[lo];
+				f->nose_r = raw[hi];
+			}
+			region(lm.noseCrest, w, h, raw, 64, &n);
+			if (n >= 2)
+				f->nose_top = raw[0].y < raw[n - 1].y ? raw[0] : raw[n - 1];
+			/* eye outlines, stored by position in the image like the eye centres */
+			pa_pt ea[PA_EYE_PTS], eb[PA_EYE_PTS];
+			int na = loop(lm.leftEye, w, h, ea, PA_EYE_PTS), nb = loop(lm.rightEye, w, h, eb, PA_EYE_PTS);
+			if (na && nb) {
+				memcpy(f->eye_poly[0], swap ? eb : ea, sizeof ea);
+				memcpy(f->eye_poly[1], swap ? ea : eb, sizeof ea);
+				f->neye = PA_EYE_PTS;
+			}
 			pa_finish_face(f, aspect);
+			/* eyebrows need the head's roll, so after finish_face */
+			pa_pt ba[64], bb2[64];
+			int nba, nbb;
+			region(lm.leftEyebrow, w, h, ba, 64, &nba);
+			region(lm.rightEyebrow, w, h, bb2, 64, &nbb);
+			if (nba >= 2 && nbb >= 2) {
+				pa_brow_from_points(swap ? bb2 : ba, swap ? nbb : nba, f->roll, aspect, f->brow_line[0], &f->brow_thick[0]);
+				pa_brow_from_points(swap ? ba : bb2, swap ? nba : nbb, f->roll, aspect, f->brow_line[1], &f->brow_thick[1]);
+				/* centre lines run image-left to image-right; the inner end of the left brow is its right end */
+				for (int i = 0; i < PA_BROW_PTS / 2; i++) {
+					pa_pt t = f->brow_line[0][i];
+					f->brow_line[0][i] = f->brow_line[0][PA_BROW_PTS - 1 - i];
+					f->brow_line[0][PA_BROW_PTS - 1 - i] = t;
+				}
+				f->nbrow = PA_BROW_PTS;
+			}
 			out->nfaces++;
 		}
 		if (want & PA_WANT_PERSON) {

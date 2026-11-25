@@ -366,8 +366,18 @@ static void pf_destroy(void *data)
 
 /* ------------------------------------------------------------------ helpers */
 
+/* Direct3D 11 silently drops a texture from the shader's inputs when it becomes a render target,
+ * while OBS remembers it as still bound and skips binding it again. The blur passes take turns
+ * reading and writing the same textures, so clear the inputs before every pass. */
+static void unbind_inputs(void)
+{
+	for (int i = 0; i < 8; i++)
+		gs_load_texture(NULL, i);
+}
+
 static void draw_into(gs_texrender_t *tr, uint32_t w, uint32_t h, gs_effect_t *fx, const char *tech, gs_texture_t *in)
 {
+	unbind_inputs();
 	gs_texrender_reset(tr);
 	if (!gs_texrender_begin(tr, w, h))
 		return;

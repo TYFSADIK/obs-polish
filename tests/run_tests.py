@@ -151,7 +151,10 @@ def main():
         ident, _ = render("look_identity", {**OFF, "look": "test-identity", "look_strength": 100}, frames=5)
     finally:
         os.remove(lut_dir / "test-identity.png")
-    check("identity look", np.abs(ident - src).max() <= 2 + NOISE, f"max difference {np.abs(ident - src).max()}")
+    # an identity lookup table must change nothing; 2 levels of interpolation rounding allowed.
+    # POLISH_LUT_TOLERANCE widens it for emulated GPUs (CI's macOS VM: OpenGL translated to Metal).
+    lut_tol = int(os.environ.get("POLISH_LUT_TOLERANCE", "2"))
+    check("identity look", np.abs(ident - src).max() <= lut_tol + NOISE, f"max difference {np.abs(ident - src).max()}")
     mono, _ = render("look_mono", {**OFF, "look": "mono", "look_strength": 100}, frames=5)
     chroma = np.abs(mono[..., 0] - mono[..., 2]).mean()
     check("mono look", chroma < 3, f"mean red-blue difference {chroma:.2f}")

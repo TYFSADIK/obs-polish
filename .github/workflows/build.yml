@@ -34,20 +34,27 @@ jobs:
       - uses: actions/setup-python@v5
         with: { python-version: "3.12" }
       - run: pip install numpy pillow
-      - name: Test (Vision backend)
+      - name: Build the test tool
         run: |
           cmake -S . -B build-test -DCMAKE_BUILD_TYPE=Release -DCMAKE_OSX_ARCHITECTURES=arm64 -DPOLISH_TESTS=ON
           cmake --build build-test -j --target render-test
-          POLISH_RENDER_TEST=build-test/render-test python tests/run_tests.py
+      - name: Test (Vision backend, OpenGL)
+        if: always()
+        # The VM's OpenGL is translated to Metal and rounds a lookup-table pass by up to 6 levels;
+        # real Macs are exact (and so is Metal, below)
+        env: { POLISH_LUT_TOLERANCE: "8" }
+        run: POLISH_RENDER_TEST=build-test/render-test python tests/run_tests.py
       - name: Test (Metal renderer)
+        if: always()
         run: |
           POLISH_GRAPHICS=/Applications/OBS.app/Contents/Frameworks/libobs-metal.dylib POLISH_RENDER_TEST=build-test/render-test python tests/run_tests.py
       - name: Test (ONNX backend, as on Windows and Linux)
+        if: always()
         run: |
           ORT=$(python scripts/fetch-onnxruntime.py osx-arm64)
           cmake -S . -B build-onnx -DCMAKE_BUILD_TYPE=Release -DCMAKE_OSX_ARCHITECTURES=arm64 -DPOLISH_BACKEND=onnx -DORT_LIB="$ORT"
           cmake --build build-onnx -j
-          POLISH_BUILD=build-onnx POLISH_RENDER_TEST=build-test/render-test python tests/run_tests.py
+          POLISH_LUT_TOLERANCE=8 POLISH_BUILD=build-onnx POLISH_RENDER_TEST=build-test/render-test python tests/run_tests.py
       - uses: actions/upload-artifact@v4
         if: always()
         with: { name: renders-macos, path: tests/out, if-no-files-found: ignore }

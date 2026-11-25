@@ -264,7 +264,7 @@ def main():
     check("eyebrows", info.get("brows", 0) > 0 and len(ys) > 40 and np.median(ys) < eye_row and darker > 5,
           f"{len(ys)} pixels, median row {np.median(ys) if len(ys) else 0:.0f} (eyes {eye_row:.0f}), darker by {darker:.1f}")
     ec, info = render("eye_colour", {**OFF, "eye_color": 100, "iris_color": 0xFF30B040})  # ABGR green
-    ys, xs = changed_px(ec, 4)
+    ys, xs = changed_px(ec)  # 6 levels, like every other check: emulated GPUs round a few levels off
     ok_inside = True
     for x, y in zip(xs, ys):
         if min(np.hypot(x - ix * W, y - iy * H) - 1.6 * ir * W for ix, iy, ir in info["iris"]) > 2:

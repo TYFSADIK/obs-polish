@@ -582,11 +582,11 @@ float3 fx_retro(float id, float3 c, float3 bc, float2 uv, float k)
 		return saturate(c + n * 0.3 * (1.0 - abs(y - 0.5)));
 	}
 	if (id < 30.5) { // VHS
-		float line = floor(pos.y / (2.0 * sp));
-		float j = (hash2(float2(line, style_seed)) - 0.5) * 0.003;
+		float row = floor(pos.y / (2.0 * sp)); // not "line": a reserved word in HLSL
+		float j = (hash2(float2(row, style_seed)) - 0.5) * 0.003;
 		float band = frac(style_time * 0.12);
 		float inb = smoothstep(0.0, 0.015, uv.y - band) * (1.0 - smoothstep(0.015, 0.045, uv.y - band));
-		j += inb * (hash2(float2(line, style_seed + 3.0)) - 0.5) * 0.03;
+		j += inb * (hash2(float2(row, style_seed + 3.0)) - 0.5) * 0.03;
 		float2 u2 = uv + float2(j, 0.0);
 		// soft picture and colour that bleeds to the right, from a few horizontal taps
 		float3 soft = (tx(u2 - float2(2.0 * sp * texel.x, 0.0)) + tx(u2) + tx(u2 + float2(2.0 * sp * texel.x, 0.0))) / 3.0;

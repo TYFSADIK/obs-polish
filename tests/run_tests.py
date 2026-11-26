@@ -59,6 +59,7 @@ def render(name, settings, frames=25, image=FACE, switch_to=None):
     if r.returncode != 0:
         raise RuntimeError(f"{name}: render-test exited {r.returncode}\n{r.stderr[-2000:]}")
     info = next((json.loads(l) for l in r.stdout.splitlines() if l.startswith("{")), {})
+    info["log"] = r.stderr
     return np.asarray(Image.open(out).convert("RGB")).astype(np.int32), info
 
 
@@ -98,6 +99,10 @@ def main():
     ok = bool(f) and f["eye_l"][0] < f["eye_r"][0] and f["eye_l"][1] < f["chin"][1] and abs(f["roll"]) < 0.2
     check("face tracking", ok, f"{info.get('faces')} face(s), analysis {info.get('face_ms')} ms")
     if not ok:
+        # most often the effect file did not compile on this graphics backend: show why
+        for l in info.get("log", "").splitlines():
+            if "error" in l.lower() or "polish" in l.lower():
+                print("      log:", l[:400])
         print("\nno face found: the remaining checks need one")
         sys.exit(1)
     W, H = w, h

@@ -12,6 +12,7 @@ Demo renders, with render-test (see tests/render_test.c):
                       foundation 100, soft_light 70, vline 100 + chin 40, nose_slim 100, lip_fill 100,
                       eyeshadow 100, eyeliner 100, brows 100, eye_color 100, and doc_eyes_all with
                       eyeshadow 60, eyeliner 70, brows 50, eye_color 60
+    fx_<effect>.png   every effect at its defaults (written by tests/run_tests.py)
 """
 import math
 from pathlib import Path
@@ -107,6 +108,31 @@ def faces():
             EYES, 300, 3, "eyes.jpg")
 
 
+EFFECTS = [("grayscale", "Grayscale"), ("sepia", "Sepia"), ("tealorange", "Teal & orange"), ("invert", "Invert"),
+           ("tint", "Colourize"), ("duotone", "Duotone"), ("bleach", "Bleach bypass"), ("crossprocess", "Cross-process"),
+           ("golden", "Golden hour"), ("moonlight", "Moonlight"), ("neon", "Cyberpunk"), ("colorpass", "Colour pass"),
+           ("hdr", "HDR"), ("bloom", "Bloom"), ("solarize", "Solarize"), ("posterize", "Posterize"), ("threshold", "Threshold"),
+           ("lightleak", "Light leak"), ("blur", "Blur"), ("motionblur", "Motion blur"), ("zoomblur", "Zoom blur"),
+           ("tiltshift", "Tilt-shift"), ("boxblur", "Box blur"), ("lensblur", "Lens blur"), ("unsharp", "Unsharp mask"),
+           ("denoise", "Denoise"), ("filmgrain", "Film grain"), ("vhs", "VHS"), ("crt", "CRT"), ("super8", "Super 8"),
+           ("oldfilm", "Old film"), ("halftone", "Halftone"), ("rgbsplit", "RGB split"), ("dither", "Dither"), ("lomo", "Lomo"),
+           ("glitch", "Glitch"), ("pixelate", "Pixelate"), ("fisheye", "Fisheye"), ("mirror", "Kaleidoscope"), ("wave", "Wave"),
+           ("twirl", "Twirl"), ("emboss", "Emboss"), ("edges", "Neon outline"), ("cartoon", "Cartoon"), ("oilpaint", "Oil paint"),
+           ("thermal", "Thermal"), ("nightvision", "Night vision"), ("baseline", "Original")]
+
+
+def effects():
+    f = font(BOLD, 13)
+    tw, th, cols = 150, 170, 8
+    rows = (len(EFFECTS) + cols - 1) // cols
+    o = Image.new("RGB", (cols * tw + (cols - 1) * 4, rows * th + (rows - 1) * 4), "white")
+    for k, (name, title) in enumerate(EFFECTS):
+        src = OUT / (f"fx_{name}.png" if name != "baseline" else "baseline.png")
+        im = Image.open(src).convert("RGB").crop((240, 60, 720, 604)).resize((tw, th), Image.LANCZOS)
+        o.paste(label(im, title, f, pad=4), ((k % cols) * (tw + 4), (k // cols) * (th + 4)))
+    o.save(DOCS / "effects.jpg", quality=84)
+
+
 def social(a, b):
     o = Image.new("RGB", (1280, 640), (22, 24, 30))
     a, b = a.resize((560, 560), Image.LANCZOS), b.resize((560, 560), Image.LANCZOS)
@@ -120,7 +146,7 @@ def social(a, b):
     d.text((x, 120), "Polish", font=big, fill="white")
     d.text((x, 200), "for OBS Studio", font=mid, fill=(170, 180, 200))
     y = 270
-    for line in ["Skin, makeup, eyes and face shape", "17 looks, background blur & replace", "Face-tracked stickers"]:
+    for line in ["Skin, makeup, eyes and face shape", "17 looks and 47 effects", "Background blur & replace, stickers"]:
         d.text((x, y), line, font=reg, fill=(225, 228, 235))
         y += 44
     y += 20
@@ -138,5 +164,6 @@ if __name__ == "__main__":
     a, b = demo()
     backgrounds()
     faces()
+    effects()
     social(a, b)
     print("docs images written")

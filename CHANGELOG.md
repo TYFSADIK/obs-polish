@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.5.0
+
+- **47 effects** in a new *Effects* group, each with a strength and, where it has one, its own
+  setting and colours:
+  - Colour: grayscale, sepia, teal and orange, invert, colourize, duotone, bleach bypass,
+    cross-process, golden hour, moonlight, cyberpunk neon, colour pass (keep one colour).
+  - Light: HDR, bloom, solarize, posterize, threshold, light leak.
+  - Blur: blur, motion blur, zoom blur, tilt-shift miniature, box blur, lens blur (bokeh),
+    unsharp mask, denoise.
+  - Retro: film grain, VHS, CRT scanlines, Super 8, old film, halftone, RGB split, dither, lomo.
+  - Stylize: glitch, pixelate, fisheye, mirror and kaleidoscope, wave, twirl, emboss, neon
+    outline, cartoon, oil paint, thermal, night vision, echo trails.
+- Effects apply over everything else, stickers included, so a pixelated or thermal picture has a
+  pixelated or thermal sticker.
+- **Contrast** in the Colour group, and a vignette that can lighten the corners as well as darken
+  them.
+- 29 pixel checks in a real OBS on every platform, up from 24: every effect renders and changes
+  the picture, and grayscale, invert, threshold, posterize, pixelate, mirror, blur, unsharp mask,
+  outline, night vision and echo are each held to an exact property.
+
 ## 0.4.0
 
 - **Eye makeup:** eyeshadow, eyeliner with a small wing, eyebrows (fill and define) and eye colour,

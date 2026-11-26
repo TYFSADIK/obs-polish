@@ -14,7 +14,7 @@
 OBS_DECLARE_MODULE()
 OBS_MODULE_USE_DEFAULT_LOCALE("obs-polish", "en-US")
 
-#define POLISH_VERSION "0.4.0"
+#define POLISH_VERSION "0.5.0"
 
 MODULE_EXPORT const char *obs_module_description(void)
 {

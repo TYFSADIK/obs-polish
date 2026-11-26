@@ -4,8 +4,9 @@
 
 **Free, open-source beauty and camera effects for [OBS Studio](https://obsproject.com).**<br>
 Skin smoothing, foundation, soft light, makeup (lips, blush, eyeshadow, eyeliner, brows, eye
-colour), face shape (jaw, chin, nose, eyes, lips), 17 colour looks, background blur or
-replacement and face-tracked stickers. Windows, macOS and Linux. No watermark, no account, nothing uploaded.
+colour), face shape (jaw, chin, nose, eyes, lips), 17 colour looks, 47 effects (from film grain,
+VHS and halftone to glitch, thermal and echo trails), background blur or replacement and
+face-tracked stickers. Windows, macOS and Linux. No watermark, no account, nothing uploaded.
 
 [![build](https://github.com/TYFSADIK/obs-polish/actions/workflows/build.yml/badge.svg)](https://github.com/TYFSADIK/obs-polish/actions/workflows/build.yml)
 [![release](https://img.shields.io/github/v/release/TYFSADIK/obs-polish)](https://github.com/TYFSADIK/obs-polish/releases/latest)
@@ -125,7 +126,8 @@ Close OBS and delete the folder:
 | **Beauty** | edge-preserving skin smoothing, only on skin inside the tracked face; brightening that keeps skin's own colour; foundation that evens tone towards a shade you pick; soft light; sharpening |
 | **Makeup** | lipstick, blush, eyeshadow, eyeliner, eyebrows and eye colour, each in any colour; teeth whitening, eye brightening |
 | **Face shape** | slim face, V-shape jaw, chin length, slim nose, bigger eyes and fuller lips, from the face landmarks |
-| **Colour** | 17 looks: Portrait (Rosy, Fresh, Porcelain), Food (Appetizing), Landscape (Lush, Sunset), Modern (Cinematic, Noir, Vintage), Warm, Cool, Golden hour, Vivid, Pastel, Teal and orange, Mono, Film; strength, exposure, warmth, saturation, vignette, film grain |
+| **Colour** | 17 looks: Portrait (Rosy, Fresh, Porcelain), Food (Appetizing), Landscape (Lush, Sunset), Modern (Cinematic, Noir, Vintage), Warm, Cool, Golden hour, Vivid, Pastel, Teal and orange, Mono, Film; strength, exposure, contrast, warmth, saturation, vignette (darker or lighter corners), film grain |
+| **Effects** | 47, each with a strength: **colour** (grayscale, sepia, teal and orange, invert, colourize, duotone, bleach bypass, cross-process, golden hour, moonlight, cyberpunk, colour pass), **light** (HDR, bloom, solarize, posterize, threshold, light leak), **blur** (blur, motion, zoom, tilt-shift, box, lens blur, unsharp mask, denoise), **retro** (film grain, VHS, CRT, Super 8, old film, halftone, RGB split, dither, lomo), **stylize** (glitch, pixelate, fisheye, mirror and kaleidoscope, wave, twirl, emboss, neon outline, cartoon, oil paint, thermal, night vision, echo trails) |
 | **Background** | blur, a solid colour (a green screen without the green screen), Studio, Gradient, Bokeh lights or Sunset backdrops, or your own image |
 | **Stickers** | sunglasses, star glasses, crown, flower crown, cat ears, bunny ears, devil horns, halo, hearts, party hat; they follow your head as it moves and tilts |
 | **Compare** | a checkbox, and a hotkey you hold to see the original (**Settings > Hotkeys**) |
@@ -138,6 +140,7 @@ Close OBS and delete the folder:
 <tr><td><img src="docs/img/eyes.jpg" alt="Original eyes, then eyeshadow, eyeliner, eyebrows, eye colour, and all four together"></td></tr>
 <tr><td><img src="docs/img/face.jpg" alt="Original face, then foundation, soft light, V-shape jaw with a longer chin, slim nose and fuller lips"></td></tr>
 <tr><td align="center">Makeup: lipstick, then lipstick with blush, whiter teeth and brighter eyes</td></tr>
+<tr><td><img src="docs/img/effects.jpg" alt="The test portrait through all 47 effects, from grayscale and sepia to thermal and night vision, and the original"></td></tr>
 <tr><td><img src="docs/img/background.jpg" alt="Background blur, solid colour, the Studio, Bokeh and Sunset backdrops, and your own image"></td></tr>
 <tr><td align="center">Background: blur, colour, three built-in backdrops, your own image</td></tr>
 <tr><td><img src="docs/img/looks.jpg" alt="Rosy, Porcelain, Appetizing, Lush, Cinematic, Noir and Vintage looks, and Vintage with vignette and grain"></td></tr>
@@ -152,14 +155,15 @@ Close OBS and delete the folder:
   watermark. The face models ship inside the plugin.
 - **Light on the GPU:** about 3.6 ms per 1080p frame with every effect on, at once, on a
   MacBook Air M2 with OBS's OpenGL renderer (about 7 ms with its newer Metal renderer), measured
-  inside OBS's own engine. Effects that are switched off cost nothing.
+  inside OBS's own engine. An effect from the Effects group adds 0.2 to 2.4 ms (lens blur is the
+  most). Anything switched off costs nothing.
 - **Never stalls a frame.** Face analysis runs on its own thread on a small copy of the frame;
   if it is busy, that frame keeps the last result.
 
 ## How it works
 
 ```
-camera ─┬─► smooth, brighten, foundation ─► makeup ─► face shape ─► background ─► soft light ─► look, vignette, grain ─► sticker ─► OBS
+camera ─┬─► smooth, brighten, foundation ─► makeup ─► face shape ─► background ─► soft light ─► look, vignette, grain ─► sticker ─► effect ─► OBS
         │               ▲                     ▲          ▲              ▲                                                ▲
         └─► 384 px copy ─► face analysis (its own thread): landmarks, lips, eyes, brows, iris, person mask
 ```
@@ -175,7 +179,7 @@ in a million.
 
 ## Tested on every platform
 
-Every push builds all five packages and runs the same 24 pixel checks inside a real OBS on each
+Every push builds all five packages and runs the same 29 pixel checks inside a real OBS on each
 platform (no window; [tests/run_tests.py](tests/run_tests.py)):
 
 | Platform | OBS | Graphics |
@@ -190,7 +194,9 @@ found; smoothing halves skin detail and leaves the background alone; brightening
 hue; face shape only moves pixels near the face; lipstick only touches the mouth; eyeshadow,
 eyeliner and eyebrows land above the eyes and eye colour stays inside the irises; foundation
 evens skin colour without touching the background; effects stacked together still land where
-they should; the background modes replace the background and keep the person; compare shows the
+they should; every one of the 47 effects renders and changes the picture, grayscale has no colour
+left, invert is exact, threshold is pure black and white, mirror is symmetric, and echo leaves a
+trail; the background modes replace the background and keep the person; compare shows the
 original exactly.
 
 ## Build from source

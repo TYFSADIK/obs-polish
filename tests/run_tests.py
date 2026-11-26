@@ -48,14 +48,18 @@ results = []
 NOISE = 0
 
 
-def render(name, settings, frames=25, image=FACE):
+def render(name, settings, frames=25, image=FACE, switch_to=None):
     out = OUT / f"{name}.png"
     arg = "none" if settings is None else json.dumps(settings)
+    env = dict(os.environ)
+    if switch_to:
+        env["POLISH_SWITCH_IMAGE"] = str(switch_to)
     r = subprocess.run([str(TOOL), str(PLUGIN_BIN), str(PLUGIN_DATA), str(image), str(out), arg, str(frames), "--json"],
-                       capture_output=True, text=True, timeout=600)
+                       capture_output=True, text=True, timeout=600, env=env)
     if r.returncode != 0:
         raise RuntimeError(f"{name}: render-test exited {r.returncode}\n{r.stderr[-2000:]}")
     info = next((json.loads(l) for l in r.stdout.splitlines() if l.startswith("{")), {})
+    info["log"] = r.stderr
     return np.asarray(Image.open(out).convert("RGB")).astype(np.int32), info
 
 
@@ -95,6 +99,10 @@ def main():
     ok = bool(f) and f["eye_l"][0] < f["eye_r"][0] and f["eye_l"][1] < f["chin"][1] and abs(f["roll"]) < 0.2
     check("face tracking", ok, f"{info.get('faces')} face(s), analysis {info.get('face_ms')} ms")
     if not ok:
+        # most often the effect file did not compile on this graphics backend: show why
+        for l in info.get("log", "").splitlines():
+            if "error" in l.lower() or "polish" in l.lower():
+                print("      log:", l[:400])
         print("\nno face found: the remaining checks need one")
         sys.exit(1)
     W, H = w, h
@@ -273,6 +281,63 @@ def main():
     greener = (ec[ys, xs, 1] - ec[ys, xs, 2]).mean() - (src[ys, xs, 1] - src[ys, xs, 2]).mean() if len(ys) else 0
     check("eye colour", len(ys) > 10 and ok_inside and greener > 3,
           f"{len(ys)} pixels, all inside the irises: {ok_inside}, green-blue +{greener:.1f}")
+
+    # 20. effects: each one changes the picture without breaking it, and those with an exact
+    # property are held to it
+    STYLES = ["grayscale", "sepia", "tealorange", "invert", "tint", "duotone", "bleach", "crossprocess", "golden", "moonlight",
+              "neon", "colorpass", "hdr", "bloom", "solarize", "posterize", "threshold", "lightleak", "blur", "motionblur",
+              "zoomblur", "tiltshift", "boxblur", "lensblur", "unsharp", "denoise", "filmgrain", "vhs", "crt", "super8", "oldfilm",
+              "halftone", "rgbsplit", "dither", "lomo", "glitch", "pixelate", "fisheye", "mirror", "wave", "twirl", "emboss",
+              "edges", "cartoon", "oilpaint", "thermal", "nightvision"]
+    broken, unchanged = [], []
+    renders = {}
+    for st in STYLES:
+        im, _ = render(f"fx_{st}", {**OFF, "style": st}, frames=8)
+        renders[st] = im
+        if im.reshape(-1, 3).std(axis=0).mean() < 8:
+            broken.append(st)
+        # denoise and colour pass barely change a clean, mostly white and grey test picture
+        if np.abs(im - src).mean() < (0.5 if st in ("denoise", "colorpass") else 3):
+            unchanged.append(st)
+    check("every effect renders", not broken and not unchanged,
+          f"{len(STYLES)} effects; flat: {broken or 'none'}; unchanged: {unchanged or 'none'}")
+    g = renders["grayscale"]
+    inv = renders["invert"]
+    th = renders["threshold"]
+    mid = ((th > 12) & (th < 243)).mean()
+    post_levels = len(np.unique(renders["posterize"][..., 1]))
+    px = renders["pixelate"]
+    same_next = (np.abs(np.diff(px, axis=1)).max(axis=2) == 0).mean()
+    check("colour effects exact", np.abs(g[..., 0] - g[..., 2]).max() <= 2 and np.abs(inv - (255 - src)).max() <= 3 + NOISE
+          and mid < 0.002 and post_levels <= 14,
+          f"grayscale red-blue max {np.abs(g[..., 0] - g[..., 2]).max()}, invert off by {np.abs(inv - (255 - src)).max()}, "
+          f"threshold grey pixels {mid:.4f}, posterize green levels {post_levels}")
+    mir, _ = render("fx_mirror2", {**OFF, "style": "mirror", "style_param": 0}, frames=5)
+    sym = np.abs(mir - mir[:, ::-1]).mean()
+    blur_d, sharp_d = detail(region(renders["blur"], skin)), detail(region(renders["unsharp"], skin))
+    ed = renders["edges"].mean()
+    nv = renders["nightvision"].reshape(-1, 3).mean(axis=0)
+    check("geometry and detail effects", same_next > 0.9 and sym < 2 and blur_d < d0 * 0.6 and sharp_d > d0 * 1.1 and ed < 70
+          and nv[1] > nv[0] * 2 and nv[1] > nv[2] * 2,
+          f"pixelate same-as-next {same_next:.2f}, mirror asymmetry {sym:.2f}, forehead detail {d0:.2f} blur {blur_d:.2f} "
+          f"unsharp {sharp_d:.2f}, outline brightness {ed:.0f}, night vision {nv.round()}")
+    # echo: halfway through, the picture is replaced by its mirror image (same size); with echo the
+    # result still holds the first picture, without it, none of it
+    mirror_img = OUT / "face_mirror.png"
+    Image.fromarray(raw[:, ::-1].astype(np.uint8)).save(mirror_img)
+    no_echo, _ = render("fx_echo_off", {**OFF, "vignette": 1}, frames=7, switch_to=mirror_img)
+    echo, _ = render("fx_echo", {**OFF, "style": "echo", "style_param": 100}, frames=7, switch_to=mirror_img)
+    after = no_echo  # what the second picture looks like through OBS
+    check("echo trails", np.abs(echo - after).mean() > 10 and np.abs(echo - src).mean() < np.abs(after - src).mean() * 0.8,
+          f"echo differs from the new picture by {np.abs(echo - after).mean():.1f}; "
+          f"distance to the old picture {np.abs(echo - src).mean():.1f} vs {np.abs(after - src).mean():.1f} without echo")
+    # contrast, a vignette that lightens, and an effect at strength 0 doing nothing
+    ct, _ = render("contrast", {**OFF, "contrast": 50}, frames=5)
+    vl, _ = render("vignette_light", {**OFF, "vignette": -100}, frames=5)
+    z, _ = render("fx_zero", {**OFF, "style": "pixelate", "style_amount": 0}, frames=5)
+    corner_l = region(vl, (0, 0, 80, 80)).mean() - region(src, (0, 0, 80, 80)).mean()
+    check("contrast, light vignette, strength 0", ct.std() > src.std() * 1.15 and corner_l > 20 and np.abs(z - src).max() <= NOISE,
+          f"spread {src.std():.1f} -> {ct.std():.1f}, corner lighter by {corner_l:.1f}, strength 0 max difference {np.abs(z - src).max()}")
 
     failed = [n for n, ok, _ in results if not ok]
     print(f"\n{len(results) - len(failed)} of {len(results)} passed")

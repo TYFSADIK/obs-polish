@@ -9,6 +9,7 @@
  *   POLISH_IMAGE_SOURCE_BIN    OBS's image-source plugin binary
  *   POLISH_IMAGE_SOURCE_DATA   its data directory
  *   POLISH_BENCH=1             no sleeping, wait for the GPU every frame, print ms per frame
+ *   POLISH_SWITCH_IMAGE=path   halfway through, show this image instead (for effects that need motion)
  * Settings "none" renders the source without the filter: the baseline OBS itself would show.
  * With --json the filter's analysis state (faces found, landmark positions) is printed. */
 #include <obs.h>
@@ -145,7 +146,15 @@ int main(int argc, char **argv)
 	gs_texrender_t *tr = NULL;
 	gs_stagesurf_t *stage = NULL;
 	uint64_t t_start = 0;
+	const char *switch_to = getenv("POLISH_SWITCH_IMAGE");
 	for (int f = 0; f < frames; f++) {
+		if (switch_to && f == frames / 2) {
+			obs_data_t *ns = obs_data_create();
+			obs_data_set_string(ns, "file", switch_to);
+			obs_source_update(source, ns);
+			obs_data_release(ns);
+			os_sleep_ms(200); /* the image source loads the new file on its own thread */
+		}
 		obs_enter_graphics();
 		if (!tr) {
 			tr = gs_texrender_create(GS_RGBA, GS_ZS_NONE);
